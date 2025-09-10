@@ -1,26 +1,19 @@
 # generate_slider_html.py
-import os
-import pathlib
+import os, pathlib
 
-# === Configuration ===
-# Steps 0000..0012 (13 frames). Change if your files differ.
+# 0000..0012
 steps = [f"{i:04d}" for i in range(13)]
 
-# Folders RELATIVE to the HTML file:
-# Use "." if PNGs are in the same folder as the HTML,
-# or e.g. "ZELL_PLOTS/Zell_2m_Combiprecip" etc. for GitHub Pages under docs/.
-left_dir  = "."   # folder for Zell_2m-*.png (only rainfall)
-right_dir = "."   # folder for Zell_2m_bach-*.png (rainfall + discharge)
+# folders where your PNGs actually are (relative to index.html at repo root)
+left_dir  = "ZELL_PLOTS/Zell_2m_Combiprecip"        # Only rainfall
+right_dir = "ZELL_PLOTS/Zell_2m_bach_Combiprecip"   # Rainfall + discharge
 
-# Filenames
-left_prefix  = "Zell_2m-"
-right_prefix = "Zell_2m_bach-"
+left_prefix, right_prefix = "Zell_2m-", "Zell_2m_bach-"
 image_suffix = "_nocbar.png"
 
-# Output HTML path (same folder as script by default)
-output_html = os.path.join(".", "slider_viewer.html")
+# write the homepage
+output_html = "index.html"
 
-# === HTML content ===
 html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -75,7 +68,6 @@ html = f"""<!DOCTYPE html>
       idx = Math.max(0, Math.min(steps.length-1, Number(idx)||0));
       const s = steps[idx];
       stepTxt.textContent = s;
-      // cache-buster to avoid stale images from browser cache
       leftImg.src  = `${{leftDir}}/${{leftPrefix}}${{s}}${{suffix}}?v=${{s}}`;
       rightImg.src = `${{rightDir}}/${{rightPrefix}}${{s}}${{suffix}}?v=${{s}}`;
       slider.value = idx;
@@ -94,11 +86,10 @@ html = f"""<!DOCTYPE html>
 </html>
 """
 
-# === Write file
 with open(output_html, "w", encoding="utf-8") as f:
     f.write(html)
 
 print("✅ HTML viewer created at:", pathlib.Path(output_html).resolve())
-print("📂 Expected images (adjust folders if needed):")
-print(f"   {left_dir}/{left_prefix}0000{image_suffix} … 0012")
-print(f"   {right_dir}/{right_prefix}0000{image_suffix} … 0012")
+print("📂 Expected images:")
+print("   ZELL_PLOTS/Zell_2m_Combiprecip/Zell_2m-0000_nocbar.png … 0012")
+print("   ZELL_PLOTS/Zell_2m_bach_Combiprecip/Zell_2m_bach-0000_nocbar.png … 0012")
