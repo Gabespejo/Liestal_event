@@ -70,7 +70,7 @@ def main():
         print(f"No temporary .asc found to delete at: {asc_file}")
 
     # 5) write DEM bounds out for the next script
-    bounds_path = args.output_dem.replace(".dem", "_4km_bounds.txt")
+    bounds_path = args.output_dem.replace(".dem", "_bounds.txt")
     with open(bounds_path, "w") as f:
         # bounds is a tuple: (minx, miny, maxx, maxy)
         f.write(",".join(str(b) for b in bounds))

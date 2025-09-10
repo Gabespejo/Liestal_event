@@ -3,6 +3,9 @@ import os
 import sys
 import argparse
 import geopandas as gpd
+import rasterio
+from rasterio.warp import reproject, Resampling
+import numpy as np
 from glob import glob
 
 # make sure your src is on PYTHONPATH (use this file's folder)
@@ -13,7 +16,6 @@ sys.path.insert(0, SRC_DIR)
 from DEM_processing import (
     geopackage_to_raster,
     clip_raster_to_bbox,
-    resample_raster,
     convert_tif_to_asc,
     rename_file_extension,
 )
@@ -32,7 +34,7 @@ def main():
     p.add_argument("--code-field",  default="LC_27")
     p.add_argument("--work-folder", required=True, help="Folder that contains the *bounds.txt and where temps are written")
     p.add_argument("--output-n",    required=True, help="Final output .n path")
-    p.add_argument("--res-2m",      type=float, default=2.0)
+    p.add_argument("--input-dem",   required=True, help="DEM GeoTIFF used for alignment")
     p.add_argument("--bounds-name", default=None,
                    help="Filename (not a path) of the bounds text under --work-folder "
                         "(e.g. 'Zell_2m_bounds.txt'). If omitted, will try *_bounds.txt, "
@@ -55,7 +57,7 @@ def main():
         if candidates:
             bounds_file = candidates[0]
         else:
-            # final fallback to the previous default
+            # final fallback
             fallback = os.path.join(args.work_folder, "Liestal_2m_bounds.txt")
             if os.path.exists(fallback):
                 bounds_file = fallback
@@ -87,20 +89,37 @@ def main():
         bbox_crs = "EPSG:2056"
     )
 
-    # 4) Resample to 2 m
-    tif2m = os.path.join(args.work_folder, "manning_2m_tmp.tif")
-    resample_raster(
-        input_raster = clipped,
-        output_raster = tif2m,
-        target_resolution = args.res_2m,
-        resampling_method = "nearest"
-    )
+    # 4) Align to DEM grid
+    tif2m = os.path.join(args.work_folder, "manning_aligned.tif")
+    with rasterio.open(args.input_dem) as src_dem:
+        dem_meta = src_dem.meta.copy()
+        dem_shape = src_dem.shape
+        dem_transform = src_dem.transform
+        dem_crs = src_dem.crs
 
-    # 5) Convert to ASCII and rename to .n at the requested output path
+    with rasterio.open(clipped) as src_clip:
+        src_data = src_clip.read(1)
+
+        aligned_data = np.full(dem_shape, -9999, dtype=np.float32)
+
+        reproject(
+            source=src_data,
+            destination=aligned_data,
+            src_transform=src_clip.transform,
+            src_crs=src_clip.crs,
+            dst_transform=dem_transform,
+            dst_crs=dem_crs,
+            resampling=Resampling.nearest,
+        )
+
+    with rasterio.open(tif2m, "w", **dem_meta) as dst:
+        dst.write(aligned_data, 1)
+
+    # 5) Convert to ASCII and rename to .n
     asc = tif2m.replace(".tif", ".asc")
     convert_tif_to_asc(tif2m, asc, desired_nodata_value=-9999)
-    # rename creates a .n next to asc; then move to args.output_n if needed
     rename_file_extension(asc, ".n")
+
     tmp_n = asc.replace(".asc", ".n")
     if os.path.abspath(tmp_n) != os.path.abspath(args.output_n):
         os.replace(tmp_n, args.output_n)
@@ -111,10 +130,7 @@ def main():
             os.remove(tmp)
             print(f" Deleted: {tmp}")
 
-    print(f" Manning raster saved: {args.output_n}")
+    print(f"✔ Manning raster aligned to DEM and saved: {args.output_n}")
 
 if __name__ == "__main__":
     main()
-
-    
-

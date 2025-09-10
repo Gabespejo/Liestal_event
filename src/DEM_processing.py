@@ -245,6 +245,86 @@ def extract_auto_matched_rasters(
     return minx, miny, maxx, maxy
 
 #############################################################################################
+###################### RESHAPE TO MATCH COMBIPRECIP IF I cropped it manually in Qgis ########
+###########################################################################################
+import os
+import rasterio
+from rasterio.windows import from_bounds
+
+def snap_bounds_to_grid(bounds, base=1000, mode="in"):
+    """
+    Snap bounds to nearest multiple of base (e.g. 1000 m).
+
+    mode="out" → expand outward (may add NODATA borders)
+    mode="in"  → shrink inward (no NODATA, but smaller extent)
+    """
+    minx, miny, maxx, maxy = bounds
+    if mode == "out":
+        minx = (minx // base) * base
+        miny = (miny // base) * base
+        maxx = ((maxx + base - 1) // base) * base  # ceil
+        maxy = ((maxy + base - 1) // base) * base
+    elif mode == "in":
+        minx = ((minx + base - 1) // base) * base  # ceil up
+        miny = ((miny + base - 1) // base) * base
+        maxx = (maxx // base) * base                # floor down
+        maxy = (maxy // base) * base
+    else:
+        raise ValueError("mode must be 'out' or 'in'")
+    return minx, miny, maxx, maxy
+
+
+def resnap_dem_to_combiprecip(input_dem, output_dem, snap_res=1000, mode="in"):
+    """
+    Resnap an existing DEM so its bounding box aligns to the 1 km Combiprecip grid.
+    
+    Parameters
+    ----------
+    input_dem : str
+        Path to input DEM (GeoTIFF).
+    output_dem : str
+        Path to output resnapped DEM (GeoTIFF).
+    snap_res : int, default=1000
+        Grid size to snap to (Combiprecip is 1 km).
+    mode : str, "in" or "out"
+        - "in": shrink inward → smaller DEM, no NODATA padding
+        - "out": expand outward → same/larger DEM, may add NODATA
+    """
+    with rasterio.open(input_dem) as src:
+        # Original bounds
+        bounds = src.bounds
+        print(f"Original DEM bounds: {bounds}")
+
+        # Snap to 1 km grid
+        snapped = snap_bounds_to_grid(bounds, base=snap_res, mode=mode)
+        print(f"Snapped DEM bounds ({mode}): {snapped}")
+
+        # Compute window corresponding to snapped extent
+        window = from_bounds(*snapped, transform=src.transform)
+        window = window.round_offsets().round_lengths()
+
+        # Read data in that window (no padding if mode="in")
+        data = src.read(1, window=window)
+
+        # Define new transform
+        transform = src.window_transform(window)
+
+        # Write new DEM
+        profile = src.profile
+        profile.update({
+            "height": data.shape[0],
+            "width": data.shape[1],
+            "transform": transform
+        })
+
+        with rasterio.open(output_dem, "w", **profile) as dst:
+            dst.write(data, 1)
+
+    print(f"✔ Resnapped DEM saved to {output_dem}")
+    return snapped
+
+
+##############################################################################################
 
 import os
 import shutil
@@ -2051,6 +2131,106 @@ def create_par_file_Liestal_Combiprecip(base_name, output_file_path):
         print(f"✔ File created at: {output_file_path}")
     except Exception as e:
         print(f" Error: {e}")
+##############################################################################
+
+def create_par_file_Combiprecip(base_name, time, output_file_path):
+    """
+    Creates a .par text file for a single deterministic run (no ensemble index).
+    'time' should be given in seconds.
+    """
+    file_data = {
+        "DEMfile": f"{base_name}.dem",
+        "dynamicrainfile": f"{base_name}.nc",
+        "stagefile": f"{base_name}.stage",
+        "dirroot": base_name,
+        "manningfile": f"{base_name}.n",
+        "bcifile":f"{base_name}.bci",
+        "resroot": base_name,  # No _1 or ensemble suffix
+        "sim_time": str(time),  # <-- fixed!
+        "initial_tstep": "1.0",
+        "saveint": "3600.0",
+        "massint": "1.0",
+        "fv1": "",
+        "cuda": "",
+        "netcdf_out": ""
+    }
+
+    try:
+        with open(output_file_path, 'w') as f:
+            f.write("# Parameters and Values\n\n")
+            for key, value in file_data.items():
+                f.write(f"{key:25} {value}\n")
+        print(f"✔ File created at: {output_file_path}")
+    except Exception as e:
+        print(f" Error: {e}")
+############################################################################
+
+def create_par_file_Combiprecip_bdy(base_name, time, output_file_path):
+    """
+    Creates a .par text file for a single deterministic run (no ensemble index).
+    'time' should be given in seconds.
+    """
+    file_data = {
+        "DEMfile": f"{base_name}.dem",
+        "dynamicrainfile": f"{base_name}.nc",
+        "stagefile": f"{base_name}.stage",
+        "dirroot": base_name,
+        "manningfile": f"{base_name}.n",
+        "bcifile":f"{base_name}.bci",
+        "bdyfile":f"{base_name}.bdy",
+        "resroot": base_name,  # No _1 or ensemble suffix
+        "sim_time": str(time),  # <-- fixed!
+        "initial_tstep": "1.0",
+        "saveint": "3600.0",
+        "massint": "1.0",
+        "fv1": "",
+        "cuda": "",
+        "netcdf_out": ""
+    }
+
+    try:
+        with open(output_file_path, 'w') as f:
+            f.write("# Parameters and Values\n\n")
+            for key, value in file_data.items():
+                f.write(f"{key:25} {value}\n")
+        print(f"✔ File created at: {output_file_path}")
+    except Exception as e:
+        print(f" Error: {e}")
+
+#############################################################################
+
+def create_par_file_Combiprecip_bdy_dg2(base_name, time, output_file_path):
+    """
+    Creates a .par text file for a single deterministic run (no ensemble index).
+    'time' should be given in seconds.
+    """
+    file_data = {
+        "DEMfile": f"{base_name}.dem",
+        "dynamicrainfile": f"{base_name}.nc",
+        "stagefile": f"{base_name}.stage",
+        "dirroot": base_name,
+        "manningfile": f"{base_name}.n",
+        "bcifile":f"{base_name}.bci",
+        "bdyfile":f"{base_name}.bdy",
+        "resroot": base_name,  # No _1 or ensemble suffix
+        "sim_time": str(time),  # <-- fixed!
+        "initial_tstep": "1.0",
+        "saveint": "3600.0",
+        "massint": "1.0",
+        "dg2": "",
+        "limitslopes": "",
+        "cuda": "",
+        "netcdf_out": ""
+    }
+
+    try:
+        with open(output_file_path, 'w') as f:
+            f.write("# Parameters and Values\n\n")
+            for key, value in file_data.items():
+                f.write(f"{key:25} {value}\n")
+        print(f"✔ File created at: {output_file_path}")
+    except Exception as e:
+        print(f" Error: {e}")
 
 ##############################################################################
 
@@ -2264,9 +2444,115 @@ def create_stage_file(catchment_location_csv, selected_id, output_stage_file, nu
         print(f"Error occurred: {e}")
 
 #################################################################################
-
-
-
-##################################################################################
-
 #######################################################################################################
+###################################################################################################
+########### bci coundary conditions for Combiprecip one determinitsic approach ####################
+##################################################################################################
+
+##############################################################################################################################
+##############################################################################################################################
+######################### add the QFIX as input and not anymore calculated as before ######################################
+
+def write_bci_qflex(
+    output_path,
+    Q_m3s=None,                        # total inflow discharge (m^3/s); required if you provide any inflows
+    cell_size=None,                    # grid cell size (m); required if you provide point inflows
+    point_inflows=None,                # list of (x, y) tuples for P inflows, e.g. [(2647230.071, 1177404.771), ...]
+    line_inflows=None,                 # list of dicts: [{"side":"E","start":1177400.0,"end":1177520.0}, ...]
+    outflow_side="E",                  # FREE outflow is always written
+    outflow_start=None,
+    outflow_end=None,
+    outflow_slope=None                 # optional numeric slope after FREE
+):
+    """
+    Write a .bci that can contain:
+      - zero or more point inflows (P x y QFIX <q_per_point>)
+      - zero or more line inflows (W/E/N/S start end QFIX <q_per_width>)
+      - exactly one FREE outflow (mandatory)
+
+    Rules:
+      * QFIX value is flux per unit width (m^2/s).
+      * Points: width = cell_size. If you have N points, each gets Q_total / (N * cell_size).
+      * Lines: width = segment length. If you have segments with lengths L_i, each gets Q_total / sum(L_i) (same q for all segments).
+      * Mixed: split by effective width: W_eff = N_points*cell_size + sum(L_i). Then:
+            q_point = Q_total / W_eff / cell_size
+            q_line  = Q_total / W_eff    (per unit width)
+      * If no inflows are provided, only the FREE outflow line is written.
+    """
+    lines = []
+
+    # --- validate outflow
+    if outflow_start is None or outflow_end is None:
+        raise ValueError("outflow_start and outflow_end are required.")
+
+    # --- normalize inputs
+    point_inflows = list(point_inflows or [])
+    line_inflows  = list(line_inflows or [])
+
+    have_inflows = bool(point_inflows or line_inflows)
+
+    if have_inflows and Q_m3s is None:
+        raise ValueError("Q_m3s must be provided when point_inflows or line_inflows are used.")
+
+    if point_inflows and (cell_size is None or cell_size <= 0):
+        raise ValueError("cell_size (>0) is required when using point_inflows.")
+
+    # --- compute effective widths
+    n_points = len(point_inflows)
+    sum_L = 0.0
+    if line_inflows:
+        for seg in line_inflows:
+            a = float(seg["start"])
+            b = float(seg["end"])
+            L = abs(b - a)
+            if L <= 0:
+                raise ValueError(f"Line inflow segment length must be > 0, got {L} for {seg}.")
+            sum_L += L
+
+    # --- compute per-unit-width q values when needed
+    if have_inflows:
+        if n_points and sum_L == 0:
+            # points only
+            q_per_point = Q_m3s / (n_points * float(cell_size))   # m^2/s
+            q_per_line = None
+        elif sum_L and n_points == 0:
+            # lines only
+            q_per_line = Q_m3s / sum_L                            # m^2/s
+            q_per_point = None
+        else:
+            # mixed points and lines
+            W_eff = n_points * float(cell_size) + sum_L
+            if W_eff <= 0:
+                raise ValueError("Effective width computed as zero; check inputs.")
+            q_per_point = Q_m3s / W_eff / float(cell_size)        # m^2/s
+            q_per_line  = Q_m3s / W_eff                           # m^2/s
+
+    # --- emit point inflows
+    for (x, y) in point_inflows:
+        lines.append(f"P {float(x):.3f} {float(y):.3f} QFIX {q_per_point:.3f}")
+
+    # --- emit line inflows
+    for seg in line_inflows:
+        side = seg["side"].upper()
+        a = float(seg["start"]); b = float(seg["end"])
+        if sum_L and n_points == 0:
+            qfix = q_per_line
+        elif sum_L and n_points:
+            qfix = q_per_line
+        else:
+            # safety: points-only path should not be here
+            raise RuntimeError("Internal: line inflow without computed q_per_line.")
+        lines.append(f"{side} {a:.3f} {b:.3f} QFIX {qfix:.3f}")
+
+    # --- outflow FREE
+    if outflow_slope is None:
+        lines.append(f"{outflow_side} {float(outflow_start):.3f} {float(outflow_end):.3f} FREE")
+    else:
+        lines.append(f"{outflow_side} {float(outflow_start):.3f} {float(outflow_end):.3f} FREE {float(outflow_slope):.6f}")
+
+    # --- write
+    with open(output_path, "w") as f:
+        for L in lines:
+            f.write(L + "\n")
+
+    print(f" .bci written → {output_path}")

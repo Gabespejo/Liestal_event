@@ -257,6 +257,254 @@ def crop_icon_to_dem(
         nc.close()
         print(f"✔ Saved: {out_fn}")
 ################################################################################################
+################################################################################################
+################# CROP THE COMBIPRECIP #######################################################
+#################################################################################################
+
+import numpy as np
+import xarray as xr
+import rioxarray as rxr
+from netCDF4 import Dataset
+from datetime import date
+
+def crop_deterministic_Combiprecip(
+    orig_nc: str,
+    dem_file: str,
+    output_nc: str,
+    selected_times: list,
+    *,
+    time_name: str = "REFERENCE_TS",
+    var_name: str = "CPC",
+    x_name: str = "x",
+    y_name: str = "y",
+    dem_crs: str = "EPSG:2056",
+):
+    """
+    Crop a Combiprecip NetCDF to the DEM footprint and a set of timestamps.
+
+    Parameters
+    ----------
+    orig_nc : str
+        Path to input Combiprecip NetCDF.
+    dem_file : str
+        Raster used only to read bounds (xmin,ymin,xmax,ymax). CRS assumed LV95 unless overridden.
+    output_nc : str
+        Output NetCDF path.
+    selected_times : list[str or datetime64-like]
+        Times to extract (ISO strings are fine).
+    time_name : str, default 'REFERENCE_TS'
+        Name of the time coordinate in the input file.
+    var_name : str, default 'CPC'
+        Name of the precipitation variable in the input file.
+    x_name : str, default 'x'
+        Name of the x coordinate.
+    y_name : str, default 'y'
+        Name of the y coordinate.
+    dem_crs : str, default 'EPSG:2056'
+        CRS to write on the DEM if missing (just to silence warnings).
+    """
+
+    # 1) DEM bounds (xmin, ymin, xmax, ymax)
+    dem = (
+        rxr.open_rasterio(dem_file, masked=True)
+           .sel(band=1)
+    )
+    if not dem.rio.crs:
+        dem = dem.rio.write_crs(dem_crs)
+    left, bottom, right, top = dem.rio.bounds()
+    print(f"DEM bounds ▶ X {left:.0f}→{right:.0f}, Y {bottom:.0f}→{top:.0f}")
+
+    # 2) Open NetCDF
+    ds = xr.open_dataset(orig_nc)
+
+    # sanity checks
+    for cname in (time_name, x_name, y_name):
+        if cname not in ds.coords:
+            raise KeyError(f"Coordinate '{cname}' not found in {list(ds.coords)}")
+    if var_name not in ds.data_vars:
+        raise KeyError(f"Variable '{var_name}' not found in {list(ds.data_vars)}")
+
+    # Normalize time array
+    selected_times = np.array(selected_times, dtype="datetime64[ns]")
+
+    # Slicing that respects axis direction
+    x_vals = ds[x_name].values
+    y_vals = ds[y_name].values
+    x_slice = slice(left, right) if x_vals[0] < x_vals[-1] else slice(right, left)
+    y_slice = slice(top, bottom) if y_vals[0] > y_vals[-1] else slice(bottom, top)
+
+    # 3) Subset in time & space
+    ds_sel = (
+        ds.sel({time_name: selected_times})
+          .sel({x_name: x_slice, y_name: y_slice})
+    )
+    if ds_sel.sizes.get(time_name, 0) == 0:
+        raise ValueError("No matching time steps after selection.")
+
+    print(f"Selected {ds_sel.sizes[time_name]} steps; spatial crop done.")
+
+    # 4) Extract variable and reorder dims → (time, y, x)
+    da = ds_sel[var_name]
+    da = da.transpose(time_name, y_name, x_name)
+    data = np.nan_to_num(da.values.astype(np.float32), nan=0.0)
+    t = da.coords[time_name].values.astype("datetime64[ns]")
+    x = da.coords[x_name].values.astype(np.float32)
+    y = da.coords[y_name].values.astype(np.float32)
+    nt, ny, nx = data.shape
+
+    # 5) Write NetCDF (variable name 'rainfall_depth')
+    nc = Dataset(output_nc, "w")
+
+    nc.createDimension("time", nt)
+    nc.createDimension("x", nx)
+    nc.createDimension("y", ny)
+
+    tv = nc.createVariable("time", "f8", ("time",))
+    xv = nc.createVariable("x", "f4", ("x",))
+    yv = nc.createVariable("y", "f4", ("y",))
+
+    tv.units = "seconds since 1970-01-01 00:00:00"
+    tv.axis = "T"
+    xv.units = "m"; xv.axis = "X"
+    yv.units = "m"; yv.axis = "Y"
+
+    tv[:] = np.arange(nt, dtype=np.float32)
+    xv[:] = x
+    yv[:] = y
+
+    rv = nc.createVariable(
+        "rainfall_depth", "f4", ("time", "y", "x"),
+        zlib=True, complevel=4, shuffle=True
+    )
+    rv.units = "mm"
+    rv.standard_name = "precipitation_amount"
+    rv[:] = data
+
+    nc.description = "Cropped deterministic CPC rainfall"
+    nc.history     = f"Created on {date.today().isoformat()}"
+    nc.source      = "CPC deterministic forecast cropped to DEM footprint"
+    nc.close()
+
+    ds.close()
+    print(f"✔ Saved: {output_nc}")
+
+##########################################################################################
+#####################CROIP COMBIPRECIP WITH DEM ADDED FROM QGIS ########################
+##################### NOT WITH DEM MERGED AUTOMATICALLY QUADRATIC FORM TO MATCH NETCDFILE #
+#############################################################################################
+import numpy as np
+import xarray as xr
+from netCDF4 import Dataset
+from datetime import date
+import os, math
+
+def crop_deterministic_Combiprecip_bounds(
+    orig_nc: str,
+    dem_file: str,
+    output_nc: str,
+    selected_times: list,
+    *,
+    time_name: str = "REFERENCE_TS",
+    var_name: str = "CPC",
+    x_name: str = "x",
+    y_name: str = "y",
+    snap_res: int = 1000,   # resolution of CPC grid
+):
+    """
+    Crop a Combiprecip NetCDF to DEM footprint using *_bounds.txt,
+    snapping DEM bounds to CPC grid resolution.
+    """
+
+    # 1) Load bounds from *_bounds.txt
+    bounds_txt = dem_file.replace(".tif", "_bounds.txt").replace(".dem", "_bounds.txt")
+    if not os.path.exists(bounds_txt):
+        raise FileNotFoundError(f"Bounds file not found: {bounds_txt}")
+
+    with open(bounds_txt, "r", encoding="utf-8-sig") as f:
+        left, bottom, right, top = map(float, f.read().strip().split(","))
+
+    # Snap bounds to multiples of snap_res (CPC resolution)
+    left   = math.floor(left   / snap_res) * snap_res
+    bottom = math.floor(bottom / snap_res) * snap_res
+    right  = math.ceil(right  / snap_res) * snap_res
+    top    = math.ceil(top    / snap_res) * snap_res
+
+    print(f"Snapped bounds: X {left}→{right}, Y {bottom}→{top}")
+
+    # 2) Open NetCDF
+    ds = xr.open_dataset(orig_nc)
+
+    # sanity checks
+    for cname in (time_name, x_name, y_name):
+        if cname not in ds.coords:
+            raise KeyError(f"Coordinate '{cname}' not found in {list(ds.coords)}")
+    if var_name not in ds.data_vars:
+        raise KeyError(f"Variable '{var_name}' not found in {list(ds.data_vars)}")
+
+    # Normalize time array
+    selected_times = np.array(selected_times, dtype="datetime64[ns]")
+
+    # Slicing that respects axis direction
+    x_vals = ds[x_name].values
+    y_vals = ds[y_name].values
+    x_slice = slice(left, right) if x_vals[0] < x_vals[-1] else slice(right, left)
+    y_slice = slice(top, bottom) if y_vals[0] > y_vals[-1] else slice(bottom, top)
+
+    # 3) Subset in time & space
+    ds_sel = (
+        ds.sel({time_name: selected_times})
+          .sel({x_name: x_slice, y_name: y_slice})
+    )
+    if ds_sel.sizes.get(time_name, 0) == 0:
+        raise ValueError("No matching time steps after selection.")
+
+    print(f"Selected {ds_sel.sizes[time_name]} steps; spatial crop done.")
+
+    # 4) Extract variable and reorder dims → (time, y, x)
+    da = ds_sel[var_name]
+    da = da.transpose(time_name, y_name, x_name)
+    data = np.nan_to_num(da.values.astype(np.float32), nan=0.0)
+    x = da.coords[x_name].values.astype(np.float32)
+    y = da.coords[y_name].values.astype(np.float32)
+    nt, ny, nx = data.shape
+
+    # 5) Write NetCDF
+    nc = Dataset(output_nc, "w")
+
+    nc.createDimension("time", nt)
+    nc.createDimension("x", nx)
+    nc.createDimension("y", ny)
+
+    tv = nc.createVariable("time", "f8", ("time",))
+    xv = nc.createVariable("x", "f4", ("x",))
+    yv = nc.createVariable("y", "f4", ("y",))
+
+    tv.units = "seconds since 1970-01-01 00:00:00"
+    tv.axis = "T"
+    xv.units = "m"; xv.axis = "X"
+    yv.units = "m"; yv.axis = "Y"
+
+    tv[:] = np.arange(nt, dtype=np.float32)
+    xv[:] = x
+    yv[:] = y
+
+    rv = nc.createVariable(
+        "rainfall_depth", "f4", ("time", "y", "x"),
+        zlib=True, complevel=4, shuffle=True
+    )
+    rv.units = "mm"
+    rv.standard_name = "precipitation_amount"
+    rv[:] = data
+
+    nc.description = "Cropped deterministic CPC rainfall"
+    nc.history     = f"Created on {date.today().isoformat()}"
+    nc.source      = "CPC deterministic forecast cropped to DEM bounds (snapped)"
+    nc.close()
+
+    ds.close()
+    print(f"✔ Saved: {output_nc}")
+
+
 ### EXAMPLE TO COPY AND RENAME THE FILE WITH DIFFERENT NAMES ##################################
 import os
 import shutil
@@ -727,3 +975,205 @@ def various_par_files_Liestal_10hour(dem_file_path, buffer_start, buffer_end, bu
         print(f"Created: {output_par_file}")
 
     print(f" All .par files created in: {output_dir}")
+
+#########################################################################################
+
+########### bci coundary conditions for Combiprecip one determinitsic approach ####################
+##################################################################################################
+
+##############################################################################################################################
+##############################################################################################################################
+######################### add the QFIX as input and not anymore calculated as before ######################################
+
+def write_bci_qflex(
+    output_path,
+    Q_m3s=None,                        # total inflow discharge (m^3/s); required if you provide any inflows
+    cell_size=None,                    # grid cell size (m); required if you provide point inflows
+    point_inflows=None,                # list of (x, y) tuples for P inflows, e.g. [(2647230.071, 1177404.771), ...]
+    line_inflows=None,                 # list of dicts: [{"side":"E","start":1177400.0,"end":1177520.0}, ...]
+    outflow_side="E",                  # FREE outflow is always written
+    outflow_start=None,
+    outflow_end=None,
+    outflow_slope=None                 # optional numeric slope after FREE
+):
+    """
+    Write a .bci that can contain:
+      - zero or more point inflows (P x y QFIX <q_per_point>)
+      - zero or more line inflows (W/E/N/S start end QFIX <q_per_width>)
+      - exactly one FREE outflow (mandatory)
+
+    Rules:
+      * QFIX value is flux per unit width (m^2/s).
+      * Points: width = cell_size. If you have N points, each gets Q_total / (N * cell_size).
+      * Lines: width = segment length. If you have segments with lengths L_i, each gets Q_total / sum(L_i) (same q for all segments).
+      * Mixed: split by effective width: W_eff = N_points*cell_size + sum(L_i). Then:
+            q_point = Q_total / W_eff / cell_size
+            q_line  = Q_total / W_eff    (per unit width)
+      * If no inflows are provided, only the FREE outflow line is written.
+    """
+    lines = []
+
+    # --- validate outflow
+    if outflow_start is None or outflow_end is None:
+        raise ValueError("outflow_start and outflow_end are required.")
+
+    # --- normalize inputs
+    point_inflows = list(point_inflows or [])
+    line_inflows  = list(line_inflows or [])
+
+    have_inflows = bool(point_inflows or line_inflows)
+
+    if have_inflows and Q_m3s is None:
+        raise ValueError("Q_m3s must be provided when point_inflows or line_inflows are used.")
+
+    if point_inflows and (cell_size is None or cell_size <= 0):
+        raise ValueError("cell_size (>0) is required when using point_inflows.")
+
+    # --- compute effective widths
+    n_points = len(point_inflows)
+    sum_L = 0.0
+    if line_inflows:
+        for seg in line_inflows:
+            a = float(seg["start"])
+            b = float(seg["end"])
+            L = abs(b - a)
+            if L <= 0:
+                raise ValueError(f"Line inflow segment length must be > 0, got {L} for {seg}.")
+            sum_L += L
+
+    # --- compute per-unit-width q values when needed
+    if have_inflows:
+        if n_points and sum_L == 0:
+            # points only
+            q_per_point = Q_m3s / (n_points * float(cell_size))   # m^2/s
+            q_per_line = None
+        elif sum_L and n_points == 0:
+            # lines only
+            q_per_line = Q_m3s / sum_L                            # m^2/s
+            q_per_point = None
+        else:
+            # mixed points and lines
+            W_eff = n_points * float(cell_size) + sum_L
+            if W_eff <= 0:
+                raise ValueError("Effective width computed as zero; check inputs.")
+            q_per_point = Q_m3s / W_eff / float(cell_size)        # m^2/s
+            q_per_line  = Q_m3s / W_eff                           # m^2/s
+
+    # --- emit point inflows
+    for (x, y) in point_inflows:
+        lines.append(f"P {float(x):.3f} {float(y):.3f} QFIX {q_per_point:.3f}")
+
+    # --- emit line inflows
+    for seg in line_inflows:
+        side = seg["side"].upper()
+        a = float(seg["start"]); b = float(seg["end"])
+        if sum_L and n_points == 0:
+            qfix = q_per_line
+        elif sum_L and n_points:
+            qfix = q_per_line
+        else:
+            # safety: points-only path should not be here
+            raise RuntimeError("Internal: line inflow without computed q_per_line.")
+        lines.append(f"{side} {a:.3f} {b:.3f} QFIX {qfix:.3f}")
+
+    # --- outflow FREE
+    if outflow_slope is None:
+        lines.append(f"{outflow_side} {float(outflow_start):.3f} {float(outflow_end):.3f} FREE")
+    else:
+        lines.append(f"{outflow_side} {float(outflow_start):.3f} {float(outflow_end):.3f} FREE {float(outflow_slope):.6f}")
+
+    # --- write
+    with open(output_path, "w") as f:
+        for L in lines:
+            f.write(L + "\n")
+
+    print(f" .bci written → {output_path}")
+
+####################################################################################
+
+def write_bci_qvar(
+    output_path,
+    inflows=None,             # dict: {"QPF": [(x,y),...], "QPE": [(x,y),...]}
+    outflow_side="E",         # FREE outflow is always written
+    outflow_start=None,
+    outflow_end=None,
+    outflow_slope=None
+):
+    """
+    Write a .bci file with QVAR inflows and one FREE outflow.
+
+    inflows: dict mapping inflow_name -> list of (x,y) points
+             e.g. {"QPF":[(2704418.096,1256357.968), (2704420.096,1256357.968)],
+                   "QPE":[(...), (...)]}
+    """
+    if outflow_start is None or outflow_end is None:
+        raise ValueError("outflow_start and outflow_end are required.")
+
+    lines = []
+
+    # --- emit QVAR point inflows
+    if inflows:
+        for inflow_name, points in inflows.items():
+            for (x, y) in points:
+                lines.append(f"P {float(x):.3f} {float(y):.3f} QVAR {inflow_name}")
+
+    # --- FREE outflow
+    if outflow_slope is None:
+        lines.append(f"{outflow_side} {float(outflow_start):.3f} {float(outflow_end):.3f} FREE")
+    else:
+        lines.append(
+            f"{outflow_side} {float(outflow_start):.3f} {float(outflow_end):.3f} FREE {float(outflow_slope):.6f}"
+        )
+
+    # --- write
+    with open(output_path, "w") as f:
+        for L in lines:
+            f.write(L + "\n")
+
+    print(f"✔ .bci written → {output_path}")
+
+#################################################################################
+########### bdy file ##########################################################
+from pathlib import Path
+
+def write_bdy_qvar(output_path, inflows, times):
+    """
+    Write a .bdy file for LISFLOOD with QVAR inflows.
+
+    Parameters
+    ----------
+    output_path : str
+        Path to output .bdy file
+    inflows : dict
+        Dictionary of inflows, e.g.
+        {
+          "QPF": {"width": 10, "discharges": [0,0,0,0.5,9,4.5,2.5,0]},
+          "QPE": {"width": 10, "discharges": [0,...]},
+        }
+    times : list[int]
+        Time steps in seconds (must match length of discharges for each inflow)
+    """
+    lines = []
+    for name, cfg in inflows.items():
+        width = cfg["width"]
+        discharges = cfg["discharges"]
+
+        if len(discharges) != len(times):
+            raise ValueError(f"Inflow {name} discharges length {len(discharges)} "
+                             f"!= times length {len(times)}")
+
+        # header
+        lines.append("#inflow")
+        lines.append(f"## Values incremented = m³/s ÷ {width} = QVAR (m²/s)")
+        lines.append(name)
+        lines.append(f"{len(times)} seconds")
+
+        # rows
+        for q, t in zip(discharges, times):
+            qvar = q / width
+            lines.append(f"{qvar:.3f}\t{t}")
+
+        lines.append("")  # blank line after each inflow
+
+    Path(output_path).write_text("\n".join(lines))
+    print(f"✔ .bdy written → {output_path}")

@@ -1663,3 +1663,297 @@ def plot_Liestal_Combiprecip_perhour(
             print(f" Failed to process {filename}: {e}")
 
     print("✅ All deterministic plots (no colorbar) have been generated and saved.")
+
+###########################################################################################
+
+from datetime import datetime, timedelta
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import rasterio
+from rasterio.warp import reproject, Resampling
+from matplotlib.colors import ListedColormap, BoundaryNorm
+import cartopy.crs as ccrs
+
+
+def plot_deterministic_perhour(
+    case_name,
+    dem_file,
+    wd_folder,
+    plot_output_folder,
+    lead_times_hours,
+    initial_datetime_str=None,
+    forecast_times=None,   # 👈 NEW: observational times
+    color1="violet",
+    color2="mediumvioletred",
+    color3="darkmagenta",
+    xlim=None,
+    ylim=None,
+):
+    """
+    Plots deterministic water depth maps (single scenario, no ensembles) without colorbar.
+
+    Example filenames:
+      Zell_2m-0000.wd, Zell_2m-0001.wd, ...
+
+    Parameters
+    ----------
+    case_name : str
+        Simulation case name, e.g. "Zell_2m".
+    dem_file : str
+        Path to DEM raster.
+    wd_folder : str
+        Folder containing .wd files.
+    plot_output_folder : str
+        Where PNG plots will be saved.
+    lead_times_hours : list[int]
+        Lead times in hours (used to find filenames).
+    initial_datetime_str : str or None
+        Optional start time (ISO string). Used only if forecast_times is None.
+    forecast_times : list[str] or None
+        Observational timestamps (ISO strings). If given, they replace lead times in titles.
+    """
+
+    # ─── WMS Background ─────────────────────────────────────────
+    def get_swisstopo_background_image(xmin, xmax, ymin, ymax, resolution_m=2,
+                                       layer="ch.swisstopo.swisstlm3d-karte-grau"):
+        import requests
+        from PIL import Image
+        from io import BytesIO
+
+        width_px = int((xmax - xmin) / resolution_m)
+        height_px = int((ymax - ymin) / resolution_m)
+        bbox = f"{xmin},{ymin},{xmax},{ymax}"
+        params = {
+            "SERVICE": "WMS",
+            "REQUEST": "GetMap",
+            "VERSION": "1.3.0",
+            "LAYERS": layer,
+            "BBOX": bbox,
+            "CRS": "EPSG:2056",
+            "WIDTH": width_px,
+            "HEIGHT": height_px,
+            "FORMAT": "image/png",
+            "TRANSPARENT": "TRUE"
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "image/png,image/*,*/*;q=0.8"
+        }
+        response = requests.get("https://wms.geo.admin.ch/", params=params, headers=headers)
+        if response.status_code == 200:
+            return Image.open(BytesIO(response.content))
+        else:
+            print(f" Failed to fetch WMS: {response.status_code}")
+            return None
+
+    # ─── File names ────────────────────────────────────────────
+    time_steps = [f"{h:04d}" for h in lead_times_hours]
+    selected_filenames = [f"{case_name}-{t}.wd" for t in time_steps]
+
+    base_time = None
+    if initial_datetime_str and forecast_times is None:
+        base_time = datetime.strptime(initial_datetime_str, "%Y-%m-%dT%H:%M:%S")
+
+    os.makedirs(plot_output_folder, exist_ok=True)
+
+    # ─── DEM for extent and mask ───────────────────────────────
+    with rasterio.open(dem_file) as src_dem:
+        dem_data = src_dem.read(1)
+        dem_nodata_value = src_dem.nodata if src_dem.nodata is not None else -9999
+        dem_transform = src_dem.transform
+        dem_bounds = src_dem.bounds
+        dem_shape = dem_data.shape
+        extent = (dem_bounds.left, dem_bounds.right, dem_bounds.bottom, dem_bounds.top)
+        mask = dem_data != dem_nodata_value
+
+    xlim = xlim if xlim else (extent[0], extent[1])
+    ylim = ylim if ylim else (extent[2], extent[3])
+    zoom_extent = (xlim[0], xlim[1], ylim[0], ylim[1])
+
+    # ─── Loop through time steps ──────────────────────────────
+    for idx, (filename, lead_hours) in enumerate(zip(selected_filenames, lead_times_hours)):
+        wd_file_path = os.path.join(wd_folder, filename)
+        if not os.path.isfile(wd_file_path):
+            print(f" File not found: {filename}")
+            continue
+
+        try:
+            with rasterio.open(wd_file_path) as src_wd:
+                wd_data = src_wd.read(1)
+                wd_transform = src_wd.transform
+
+            aligned_data = np.full(dem_shape, np.nan, dtype=np.float32)
+            reproject(
+                source=wd_data,
+                destination=aligned_data,
+                src_transform=wd_transform,
+                src_crs="EPSG:2056",
+                dst_transform=dem_transform,
+                dst_crs="EPSG:2056",
+                resampling=Resampling.nearest,
+            )
+
+            masked_data = np.where((mask & (aligned_data >= 0.10)), aligned_data, np.nan)
+            transparent_data = np.where((aligned_data >= 0) & (aligned_data < 0.10), 1, np.nan)
+
+            categories = [0.10, 0.30, 0.50, 0.60]
+            colors = [color1, color2, color3]
+            cmap = ListedColormap(colors)
+            norm = BoundaryNorm(categories, cmap.N, clip=True)
+
+            fig = plt.figure(figsize=(12, 10))
+            crs_2056 = ccrs.epsg(2056)
+            ax = fig.add_subplot(1, 1, 1, projection=crs_2056)
+            ax.set_extent(zoom_extent, crs=crs_2056)
+
+            bg_img = get_swisstopo_background_image(*zoom_extent, resolution_m=2)
+            if bg_img is not None:
+                ax.imshow(bg_img, extent=zoom_extent, transform=crs_2056, zorder=0)
+
+            ax.imshow(transparent_data, extent=extent, transform=crs_2056,
+                      cmap=ListedColormap(['none']), interpolation="none", zorder=1)
+            ax.imshow(masked_data, extent=extent, transform=crs_2056,
+                      cmap=cmap, norm=norm, interpolation="none", zorder=2)
+
+            # ─── Title handling ──────────────────────────────
+            if forecast_times is not None:
+                # Observational timestamps
+                title = f"{case_name.replace('_2m','')} – {forecast_times[idx]}"
+            elif base_time:
+                # Initial datetime string (forecast mode)
+                forecast_time = base_time + timedelta(hours=lead_hours)
+                title = f"{case_name.replace('_2m','')} – {forecast_time.strftime('%Y-%m-%dT%H:%M:%S')}"
+            else:
+                # Default: simple hour labels
+                title = f"{case_name.replace('_2m','')} – Hour {lead_hours}"
+
+            ax.set_title(title, fontsize=18, fontweight="bold")
+            ax.set_xlabel("Easting (m)", fontsize=16)
+            ax.set_ylabel("Northing (m)", fontsize=16)
+
+            plot_filename = os.path.join(
+                plot_output_folder, f"{os.path.splitext(filename)[0]}_nocbar.png"
+            )
+            plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
+            plt.close()
+
+            print(f"✔ Plot saved: {plot_filename}")
+
+        except Exception as e:
+            print(f"✘ Failed to process {filename}: {e}")
+
+    print(f" All deterministic plots (no colorbar) generated for {case_name}.")
+
+
+################################################################################################
+######################## ASCII in netcdfile ###############################################
+
+# deps: rioxarray, xarray, netCDF4 (and rasterio via rioxarray)
+from typing import Dict, Sequence
+import glob, os, re
+import xarray as xr
+import rioxarray as rxr
+
+def ascii_stack_to_netcdf(
+    inputs: str | Sequence[str],
+    out_nc: str,
+    *,
+    crs: str = "EPSG:2056",
+    var_name: str = "water_depth",
+    nodata: float | None = None,
+    dtype: str = "float32",
+    complevel: int = 4,
+    step_regex: str = r"-(\d{4})\.(?:wd|asc)$",   # capture 4-digit step by default
+    chunks: Dict[str, int] | None = None,
+    use_nan_fill: bool = False,
+    strict_align: bool = True,
+    drop_single_step: bool = True,                # write 2-D if only one file
+) -> str:
+    """
+    Convert one or many ESRI ASCII grids (*.wd/*.asc) to a CF-friendly NetCDF.
+
+    `inputs` can be a glob pattern (str) or an explicit list/tuple of file paths.
+    """
+    # Resolve inputs -> files
+    if isinstance(inputs, (list, tuple)):
+        files = list(inputs)
+    else:
+        files = sorted(glob.glob(inputs))
+    if not files:
+        raise FileNotFoundError(f"No input files found from: {inputs!r}")
+
+    def _open_ascii(path: str) -> xr.DataArray:
+        try:
+            return rxr.open_rasterio(path, masked=True, chunks=chunks).squeeze("band", drop=True)
+        except Exception:
+            # fallback: force AAIGrid in case the .wd extension confuses GDAL
+            return rxr.open_rasterio(path, masked=True, chunks=chunks, driver="AAIGrid").squeeze("band", drop=True)
+
+    triplets: list[tuple[int, str, xr.DataArray]] = []
+    for f in files:
+        da = _open_ascii(f)
+        da.name = var_name
+
+        # Write CRS & nodata (prefer override; else from file)
+        if crs:
+            da.rio.write_crs(crs, inplace=True)
+        file_nodata = da.rio.nodata
+        nd = file_nodata if nodata is None else nodata
+        if nd is not None:
+            da.rio.write_nodata(nd, inplace=True)
+
+        # Extract step index
+        m = re.search(step_regex, os.path.basename(f))
+        step_val = int(m.group(1)) if m else len(triplets)
+        triplets.append((step_val, f, da))
+
+    # Sort by step and unpack
+    triplets.sort(key=lambda t: t[0])
+    steps = [t[0] for t in triplets]
+    arrays = [t[2] for t in triplets]
+
+    # Alignment checks
+    if strict_align and len(arrays) > 1:
+        ref = arrays[0]
+        ref_shape = tuple(ref.shape)
+        ref_transform = ref.rio.transform()
+        for s, fname, da in triplets:
+            if tuple(da.shape) != ref_shape:
+                raise ValueError(f"Shape mismatch in {fname}: {tuple(da.shape)} vs {ref_shape}")
+            if da.rio.transform() != ref_transform:
+                raise ValueError(f"Geotransform mismatch in {fname}; rasters must align exactly.")
+
+    # Stack (or single)
+    stack = xr.concat(arrays, dim="step").assign_coords(step=("step", steps))
+
+    # Replace nodata with NaN if requested
+    chosen_nodata = stack.rio.nodata
+    if use_nan_fill and chosen_nodata is not None:
+        stack = stack.where(stack != chosen_nodata)
+        fill_value = None
+    else:
+        fill_value = chosen_nodata
+
+    # Optionally drop step for single-file input -> produce 2-D (y,x)
+    if drop_single_step and stack.sizes.get("step", 1) == 1:
+        stack = stack.isel(step=0, drop=True)
+
+    # Minimal CF metadata; rioxarray will include `spatial_ref`
+    stack.attrs.update({"Conventions": "CF-1.8", "source": "Converted from ESRI ASCII grid"})
+    # ensure grid_mapping attribute lives on the variable
+    stack.attrs.setdefault("grid_mapping", "spatial_ref")
+
+    # --- IMPORTANT: avoid clash between attrs['_FillValue'] and encoding['_FillValue']
+    if "_FillValue" in stack.attrs:
+        stack.attrs.pop("_FillValue", None)
+
+    # Encoding
+    enc = {stack.name: dict(zlib=bool(complevel), complevel=int(complevel), dtype=dtype)}
+    if fill_value is not None:
+        enc[stack.name]["_FillValue"] = float(fill_value)
+
+    # Write
+    stack.astype(dtype).to_netcdf(out_nc, encoding=enc)
+    return out_nc
+

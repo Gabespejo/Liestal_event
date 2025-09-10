@@ -1,0 +1,156 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Ensemble Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f7f7f7;
+            margin: 0;
+            padding: 0;
+        }
+        .slider-container {
+            text-align: center;
+            padding: 10px;
+            background-color: #eeeeee;
+        }
+        input[type=range] {
+            width: 40%;
+            height: 25px;
+        }
+        .wrapper {
+            display: flex;
+            flex-direction: row;
+            height: calc(100vh - 60px);
+        }
+        .grid {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: flex-start;
+            gap: 20px;
+            padding: 20px;
+            flex-grow: 1;
+            overflow-y: auto;
+        }
+        .panel {
+            width: 320px;
+        }
+        .panel img {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ccc;
+        }
+        .panel h4 {
+            font-size: 14px;
+            margin: 5px 0;
+        }
+        .side-panel {
+            width: 120px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: #eeeeee;
+            padding: 10px;
+        }
+        .side-panel img {
+            width: 80px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="slider-container">
+    <label for="leadSlider"><strong>Lead Time:</strong></label><br>
+    <input type="range" min="0" max="5" value="0" id="leadSlider">
+</div>
+<div class="wrapper">
+<div class="grid">
+
+    <div class="panel">
+        <h4>Ensemble 1</h4>
+        <img id="img_ens1" src="Liestal_2m_1_1-0000_nocbar.png" alt="Ensemble 1">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 2</h4>
+        <img id="img_ens2" src="Liestal_2m_2_2-0000_nocbar.png" alt="Ensemble 2">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 3</h4>
+        <img id="img_ens3" src="Liestal_2m_3_3-0000_nocbar.png" alt="Ensemble 3">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 4</h4>
+        <img id="img_ens4" src="Liestal_2m_4_4-0000_nocbar.png" alt="Ensemble 4">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 5</h4>
+        <img id="img_ens5" src="Liestal_2m_5_5-0000_nocbar.png" alt="Ensemble 5">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 6</h4>
+        <img id="img_ens6" src="Liestal_2m_6_6-0000_nocbar.png" alt="Ensemble 6">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 7</h4>
+        <img id="img_ens7" src="Liestal_2m_7_7-0000_nocbar.png" alt="Ensemble 7">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 8</h4>
+        <img id="img_ens8" src="Liestal_2m_8_8-0000_nocbar.png" alt="Ensemble 8">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 9</h4>
+        <img id="img_ens9" src="Liestal_2m_9_9-0000_nocbar.png" alt="Ensemble 9">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 10</h4>
+        <img id="img_ens10" src="Liestal_2m_10_10-0000_nocbar.png" alt="Ensemble 10">
+    </div>
+    
+    <div class="panel">
+        <h4>Ensemble 11</h4>
+        <img id="img_ens11" src="Liestal_2m_11_11-0000_nocbar.png" alt="Ensemble 11">
+    </div>
+    
+</div>
+<div class="side-panel">
+    <img src="water_depth_cbar_vertical.png" alt="Colorbar">
+</div>
+</div>
+
+<script>
+    const steps = ['0000', '0012', '0024', '0036', '0048', '0060'];
+    const suffix = "_nocbar.png";
+
+    document.getElementById("leadSlider").addEventListener("input", function() {
+        const step = steps[this.value];
+document.getElementById("img_ens1").src = "Liestal_2m_1_1-" + step + suffix;
+document.getElementById("img_ens2").src = "Liestal_2m_2_2-" + step + suffix;
+document.getElementById("img_ens3").src = "Liestal_2m_3_3-" + step + suffix;
+document.getElementById("img_ens4").src = "Liestal_2m_4_4-" + step + suffix;
+document.getElementById("img_ens5").src = "Liestal_2m_5_5-" + step + suffix;
+document.getElementById("img_ens6").src = "Liestal_2m_6_6-" + step + suffix;
+document.getElementById("img_ens7").src = "Liestal_2m_7_7-" + step + suffix;
+document.getElementById("img_ens8").src = "Liestal_2m_8_8-" + step + suffix;
+document.getElementById("img_ens9").src = "Liestal_2m_9_9-" + step + suffix;
+document.getElementById("img_ens10").src = "Liestal_2m_10_10-" + step + suffix;
+document.getElementById("img_ens11").src = "Liestal_2m_11_11-" + step + suffix;
+
+    });
+</script>
+</body>
+</html>
