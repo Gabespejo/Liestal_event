@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <title>COSMO Ensembles + Combiprecip (4Ã—3)</title>
   <style>
-    :root { --panel-w: 360px; }
+    :root { --panel-w: 300px; }              /* smaller panels to fit 4 per row */
     body {
       font-family: Arial, sans-serif;
       background-color: #f7f7f7;
@@ -20,8 +20,8 @@
       z-index: 2;
     }
     .slider-container input[type=range] {
-      width: 40%;
-      height: 25px;
+      width: 50%;
+      height: 24px;
     }
     .slider-labels {
       margin: 6px 0 10px 0;
@@ -36,31 +36,38 @@
     .grid {
       flex-grow: 1;
       overflow: auto;
-      padding: 16px;
+      padding: 12px;
     }
     .grid-inner {
       display: grid;
       grid-template-columns: repeat(4, var(--panel-w));
-      gap: 18px;
+      gap: 14px;                              /* a bit tighter gap */
       justify-content: center;
     }
     .panel {
       width: var(--panel-w);
       background: #fff;
-      padding: 12px;
+      padding: 10px;
       border-radius: 10px;
       box-shadow: 0 2px 8px rgba(0,0,0,.08);
     }
-    .panel h4 { margin: 6px 0 8px 0; font-size: 14px; font-weight: 600; }
+    .panel h4 {
+      margin: 4px 0 8px 0;
+      font-size: 13px;
+      font-weight: 700;
+    }
     .panel img {
       max-width: 100%;
       height: auto;
       border: 1px solid #ccc;
       background: #fff;
       border-radius: 6px;
+      display: block;
     }
+
+    /* Bigger colorbar panel */
     .side-panel {
-      width: 120px;
+      width: 160px;                           /* wider side strip */
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -68,7 +75,15 @@
       background-color: #eeeeee;
       padding: 10px;
     }
-    .side-panel img { width: 80px; margin-top: 10px; }
+    .side-panel img {
+      width: 120px;                           /* bigger colorbar image */
+      max-width: 90%;
+      height: auto;
+      margin-top: 10px;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      background: #fff;
+    }
     .dim { color: #666; font-weight: normal; }
   </style>
 </head>
@@ -80,65 +95,65 @@
     <input type="range" min="0" max="8" value="0" id="leadSlider">
   </div>
   <div class="slider-labels">
-    Ensembles show <code>lead_time1..9</code>. Combiprecip shows <code>lead_time4..12</code> (offset +3).
+    Ensembles show <code>lead_time0..8</code>. Combiprecip shows <code>lead_time3..11</code> (offset +3).
   </div>
 </div>
 
 <div class="wrapper">
   <div class="grid">
     <div class="grid-inner">
-      <!-- 11 ensemble panels -->
+      <!-- 11 ensemble panels (now starting at lead_time0) -->
       <div class="panel">
         <h4>Ensemble 1 <span class="dim">(r1)</span></h4>
-        <img id="img_r1" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r1_lead_time1_zoom.png?v=init" alt="Ensemble r1" loading="lazy">
+        <img id="img_r1" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r1_lead_time0_zoom.png?v=init" alt="Ensemble r1" loading="lazy">
       </div>
       <div class="panel">
         <h4>Ensemble 2 <span class="dim">(r2)</span></h4>
-        <img id="img_r2" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r2_lead_time1_zoom.png?v=init" alt="Ensemble r2" loading="lazy">
+        <img id="img_r2" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r2_lead_time0_zoom.png?v=init" alt="Ensemble r2" loading="lazy">
       </div>
       <div class="panel">
         <h4>Ensemble 3 <span class="dim">(r3)</span></h4>
-        <img id="img_r3" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r3_lead_time1_zoom.png?v=init" alt="Ensemble r3" loading="lazy">
+        <img id="img_r3" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r3_lead_time0_zoom.png?v=init" alt="Ensemble r3" loading="lazy">
       </div>
       <div class="panel">
         <h4>Ensemble 4 <span class="dim">(r4)</span></h4>
-        <img id="img_r4" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r4_lead_time1_zoom.png?v=init" alt="Ensemble r4" loading="lazy">
+        <img id="img_r4" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r4_lead_time0_zoom.png?v=init" alt="Ensemble r4" loading="lazy">
       </div>
 
       <div class="panel">
         <h4>Ensemble 5 <span class="dim">(r5)</span></h4>
-        <img id="img_r5" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r5_lead_time1_zoom.png?v=init" alt="Ensemble r5" loading="lazy">
+        <img id="img_r5" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r5_lead_time0_zoom.png?v=init" alt="Ensemble r5" loading="lazy">
       </div>
       <div class="panel">
         <h4>Ensemble 6 <span class="dim">(r6)</span></h4>
-        <img id="img_r6" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r6_lead_time1_zoom.png?v=init" alt="Ensemble r6" loading="lazy">
+        <img id="img_r6" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r6_lead_time0_zoom.png?v=init" alt="Ensemble r6" loading="lazy">
       </div>
       <div class="panel">
         <h4>Ensemble 7 <span class="dim">(r7)</span></h4>
-        <img id="img_r7" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r7_lead_time1_zoom.png?v=init" alt="Ensemble r7" loading="lazy">
+        <img id="img_r7" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r7_lead_time0_zoom.png?v=init" alt="Ensemble r7" loading="lazy">
       </div>
       <div class="panel">
         <h4>Ensemble 8 <span class="dim">(r8)</span></h4>
-        <img id="img_r8" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r8_lead_time1_zoom.png?v=init" alt="Ensemble r8" loading="lazy">
+        <img id="img_r8" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r8_lead_time0_zoom.png?v=init" alt="Ensemble r8" loading="lazy">
       </div>
 
       <div class="panel">
         <h4>Ensemble 9 <span class="dim">(r9)</span></h4>
-        <img id="img_r9" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r9_lead_time1_zoom.png?v=init" alt="Ensemble r9" loading="lazy">
+        <img id="img_r9" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r9_lead_time0_zoom.png?v=init" alt="Ensemble r9" loading="lazy">
       </div>
       <div class="panel">
         <h4>Ensemble 10 <span class="dim">(r10)</span></h4>
-        <img id="img_r10" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r10_lead_time1_zoom.png?v=init" alt="Ensemble r10" loading="lazy">
+        <img id="img_r10" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r10_lead_time0_zoom.png?v=init" alt="Ensemble r10" loading="lazy">
       </div>
       <div class="panel">
         <h4>Ensemble 11 <span class="dim">(r11)</span></h4>
-        <img id="img_r11" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r11_lead_time1_zoom.png?v=init" alt="Ensemble r11" loading="lazy">
+        <img id="img_r11" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r11_lead_time0_zoom.png?v=init" alt="Ensemble r11" loading="lazy">
       </div>
 
       <!-- Panel 12: Combiprecip (deterministic) -->
       <div class="panel">
         <h4>Combiprecip <span class="dim">(deterministic)</span></h4>
-        <img id="img_combi" src="ZELL_PLOTS/Zell_2m_Combiprecip/wd_det_lead_time4_zoom.png?v=init" alt="Combiprecip det" loading="lazy">
+        <img id="img_combi" src="ZELL_PLOTS/Zell_2m_Combiprecip/wd_det_lead_time3_zoom.png?v=init" alt="Combiprecip det" loading="lazy">
       </div>
     </div> <!-- grid-inner -->
   </div>   <!-- grid -->
@@ -149,12 +164,12 @@
 </div>  <!-- wrapper -->
 
 <script>
-  // í ½í´ bump this whenever you push new images
-  const BUILD_VER = "2025-10-06a";
+  // í ½í´ bump this whenever you push new images to break browser caches
+  const BUILD_VER = "2025-10-06b";
 
-  // COSMO: lead_time 1..9 (slider indexes 0..8)
-  const leadEns = [1,2,3,4,5,6,7,8,9];
-  // Combiprecip uses lead_time (L + 3) => 4..12
+  // COSMO: lead_time0..8 (slider indexes 0..8)
+  const leadEns = [0,1,2,3,4,5,6,7,8];
+  // Combiprecip uses lead_time (L + 3) => 3..11
   const leadOffsetCombi = 3;
 
   const cosmoDir = "ZELL_PLOTS/Zell_2m_COSMO";
@@ -164,7 +179,6 @@
   const rNums       = [1,2,3,4,5,6,7,8,9,10,11];
 
   const slider = document.getElementById("leadSlider");
-  // ensure slider max matches the array length
   slider.max = String(leadEns.length - 1);
 
   function setImages(idx) {
@@ -173,7 +187,7 @@
     const L  = leadEns[idx];
     const Lc = L + leadOffsetCombi;
 
-    // Update ensemble panels with cache-busting
+    // Update ensemble panels (cache-busting)
     for (let i = 0; i < ensembleIds.length; i++) {
       const id = ensembleIds[i];
       const r  = rNums[i];
@@ -182,11 +196,13 @@
       if (img) img.src = src;
     }
 
-    // Update combiprecip (cache-busting)
+    // Update combiprecip
     const combi = document.getElementById("img_combi");
     if (combi) {
       combi.src = `${combiDir}/wd_det_lead_time${Lc}_zoom.png?v=${BUILD_VER}`;
     }
+
+    slider.value = idx;
   }
 
   slider.addEventListener("input", e => setImages(parseInt(e.target.value, 10)));

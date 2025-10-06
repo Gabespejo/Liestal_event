@@ -6,7 +6,7 @@ cosmo_dir = "ZELL_PLOTS/Zell_2m_COSMO"
 combi_dir = "ZELL_PLOTS/Zell_2m_Combiprecip"
 
 ensembles = list(range(1, 12))           # r1..r11
-lead_times_ens = list(range(1, 10))      # lead_time1..lead_time9
+lead_times_ens = list(range(0, 8))      # lead_time1..lead_time9
 # combi maps slider i -> lead_time (i + 3) => 4..12
 lead_offset_combi = 3
 
