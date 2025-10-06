@@ -485,6 +485,117 @@ def extract_relevant_rasters_v2(
     return minx, miny, maxx, maxy
 
 ##############################################################################################
+################################### download flex for all resolution #########################
+##########################################################################################
+
+import os, glob, shutil, math
+import pandas as pd
+import rasterio
+from shapely.geometry import box
+
+def _is_multiple(value, step, tol=1e-9):
+    """Return True if value is an integer multiple of step (with tolerance)."""
+    q = value / step
+    return abs(q - round(q)) < tol
+
+def _snap(value, step, how="down"):
+    """Snap value to a grid of spacing `step`."""
+    q = value / step
+    if how == "down":
+        return math.floor(q) * step
+    elif how == "up":
+        return math.ceil(q) * step
+    else:
+        return round(q) * step  # nearest
+
+def extract_relevant_rasters_flex(
+    location_csv: str,
+    dem_folder: str,
+    output_folder: str,
+    location_id,
+    square_extent: float = 4000.0,   # total width/height of the square (in DEM CRS units, meters for EPSG:2056)
+    grid_res: float | None = 2.0,    # DEM cell size; set to 0.5 for 50 cm. If None, auto-detects from a tile.
+    crs: str = "EPSG:2056"
+):
+    """
+    Extract and copy DEM GeoTIFF tiles that intersect a snapped square around a CSV point.
+
+    - The square is centered on the point `ID == location_id`.
+    - The square bounds are snapped to the DEM grid of size `grid_res`.
+    - `square_extent` must be a multiple of `grid_res` (LISFLOOD-friendly).
+    - All *.tif files in `dem_folder` intersecting the snapped square are copied to `output_folder`.
+
+    Returns (minx, miny, maxx, maxy) of the snapped square.
+    """
+
+    os.makedirs(output_folder, exist_ok=True)
+
+    # --- Read locations CSV
+    df = pd.read_csv(location_csv)
+    required = {"ID", "East_X", "North_Y"}
+    if not required.issubset(df.columns):
+        raise ValueError(f"CSV must contain columns: {required}")
+
+    row = df[df["ID"] == location_id]
+    if row.empty:
+        raise ValueError(f"Location ID {location_id} not found in {location_csv}")
+
+    cx = float(row.iloc[0]["East_X"])
+    cy = float(row.iloc[0]["North_Y"])
+
+    # --- Auto-detect grid_res if requested
+    if grid_res is None:
+        sample_tiles = glob.glob(os.path.join(dem_folder, "*.tif"))
+        if not sample_tiles:
+            raise ValueError(f"No .tif files found in {dem_folder} to auto-detect resolution.")
+        with rasterio.open(sample_tiles[0]) as src:
+            # assumes square pixels; transform.a is pixel width
+            grid_res = float(abs(src.transform.a))
+        print(f"ℹ Detected DEM resolution: {grid_res} (units of CRS)")
+
+    # --- Validate extent vs grid
+    if not _is_multiple(square_extent, grid_res):
+        raise ValueError(
+            f"'square_extent' ({square_extent}) must be a multiple of grid_res ({grid_res})."
+        )
+
+    half = square_extent / 2.0
+
+    # --- Snap to grid
+    minx = _snap(cx - half, grid_res, "down")
+    miny = _snap(cy - half, grid_res, "down")
+    maxx = minx + square_extent
+    maxy = miny + square_extent
+
+    bbox = box(minx, miny, maxx, maxy)
+    print(f" Snapped extent: {maxx - minx:.3f} × {maxy - miny:.3f} (grid {grid_res})")
+    print(f"   Bounds: X [{minx:.3f}, {maxx:.3f}], Y [{miny:.3f}, {maxy:.3f}]")
+
+    # --- Find intersecting tiles
+    relevant = []
+    for tif in glob.glob(os.path.join(dem_folder, "*.tif")):
+        try:
+            with rasterio.open(tif) as src:
+                b = src.bounds
+                rgeom = box(b.left, b.bottom, b.right, b.top)
+                if rgeom.intersects(bbox):
+                    relevant.append(tif)
+        except Exception as e:
+            print(f"⚠ Skipping {tif}: {e}")
+
+    if not relevant:
+        raise ValueError("No .tif tiles intersect the snapped area.")
+
+    # --- Copy tiles
+    for tif in relevant:
+        dst = os.path.join(output_folder, os.path.basename(tif))
+        print(f"→ Copying {os.path.basename(tif)}")
+        shutil.copy(tif, dst)
+
+    print(f" {len(relevant)} tile(s) copied to: {output_folder}")
+    return minx, miny, maxx, maxy
+
+
 
 # Re-import libraries after code execution environment reset
 import os
@@ -558,9 +669,22 @@ import os
 import glob
 from osgeo import gdal
 
-def merge_dem_rasters(input_folder, output_file, bounds, output_format="GTiff", data_type=gdal.GDT_Float32):
+
+def merge_dem_rasters(
+    input_folder,
+    output_file,
+    bounds,
+    output_format="GTiff",
+    data_type=gdal.GDT_Float32,
+    xRes=2.0,
+    yRes=2.0,
+):
     """
     Merges all .tif files into a single DEM with fixed bounds and resolution.
+
+    Parameters
+    ----------
+    xRes, yRes : pixel size (e.g., 0.5 for 50 cm; 2.0 for 2 m)
     """
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     relevant_rasters = glob.glob(os.path.join(input_folder, "*.tif"))
@@ -570,6 +694,7 @@ def merge_dem_rasters(input_folder, output_file, bounds, output_format="GTiff", 
 
     print("Merging with bounds:")
     print(f"  {bounds}")
+    print(f"Pixel size: {xRes} x {yRes}")
 
     gdal.Warp(
         destNameOrDestDS=output_file,
@@ -577,16 +702,17 @@ def merge_dem_rasters(input_folder, output_file, bounds, output_format="GTiff", 
         format=output_format,
         outputType=data_type,
         multithread=True,
-        outputBounds=bounds,                         # <--  Enforce the extent!
-        xRes=2.0,                                     # <--  Fixed resolution
-        yRes=2.0,
-        targetAlignedPixels=True                     # <--  Pixel-aligned output
+        outputBounds=bounds,          # enforce extent
+        xRes=xRes,                    # <-- now configurable
+        yRes=yRes,                    # <-- now configurable
+        targetAlignedPixels=True      # align grid to bounds
     )
 
     if os.path.exists(output_file):
         print(f" Merged DEM saved: {output_file}")
     else:
         print(" Merging failed.")
+
     
 ################################################################################################
 ######### per bounding as input ################################################################
@@ -2196,6 +2322,89 @@ def create_par_file_Combiprecip_bdy(base_name, time, output_file_path):
         print(f"✔ File created at: {output_file_path}")
     except Exception as e:
         print(f" Error: {e}")
+
+#############################################################################
+def create_par_file_Combiprecip_bdy_qoutput(base_name, time, cfl, output_file_path):
+    """
+    Creates a .par text file for a single deterministic run (no ensemble index).
+    'time' should be given in seconds.
+    """
+    file_data = {
+        "DEMfile":         f"{base_name}.dem",
+        "dynamicrainfile": f"{base_name}.nc",
+        "stagefile":       f"{base_name}.stage",
+        "dirroot":         base_name,
+        "manningfile":     f"{base_name}.n",
+        "bcifile":         f"{base_name}.bci",
+        "bdyfile":         f"{base_name}.bdy",
+        "resroot":         base_name,   # No _1 or ensemble suffix
+        "sim_time":        str(time),
+        "initial_tstep":   "1.0",
+        "saveint":         "3600.0",
+        "massint":         "1.0",
+        "cfl":             str(cfl),    # <-- now uses the parameter
+        # flags: write as bare keys (no value)
+        "fv1":             "",
+        "cuda":            "",
+        "qoutput":         "",
+        "voutput":         "",
+        "netcdf_out":      "",
+    }
+
+    try:
+        with open(output_file_path, 'w') as f:
+            f.write("# Parameters and Values\n\n")
+            for key, value in file_data.items():
+                if value == "":
+                    f.write(f"{key}\n")               # bare flag line
+                else:
+                    f.write(f"{key:25} {value}\n")    # key/value line
+        print(f"✔ File created at: {output_file_path}")
+    except Exception as e:
+        print(f" Error: {e}")
+        
+############################################################################
+
+#############################################################################
+def create_par_file_Forecast_bdy_qoutput(base_name, time, cfl, output_file_path):
+    """
+    Creates a .par text file for a single deterministic run (no ensemble index).
+    'time' should be given in seconds.
+    """
+    file_data = {
+        "DEMfile":         f"{base_name}.dem",
+        "dynamicrainfile": f"{base_name}.nc",
+        "stagefile":       f"{base_name}.stage",
+        "dirroot":         base_name,
+        "manningfile":     f"{base_name}.n",
+        "bcifile":         f"{base_name}.bci",
+        "bdyfile":         f"{base_name}.bdy",
+        "resroot":         base_name,   # No _1 or ensemble suffix
+        "sim_time":        str(time),
+        "initial_tstep":   "1.0",
+        "saveint":         "3600.0",
+        "massint":         "1.0",
+        "cfl":             str(cfl),    # <-- now uses the parameter
+        # flags: write as bare keys (no value)
+        #"fv1":             "",
+        #"cuda":            "",
+        "qoutput":         "",
+        "voutput":         "",
+        "netcdf_out":      "",
+    }
+
+    try:
+        with open(output_file_path, 'w') as f:
+            f.write("# Parameters and Values\n\n")
+            for key, value in file_data.items():
+                if value == "":
+                    f.write(f"{key}\n")               # bare flag line
+                else:
+                    f.write(f"{key:25} {value}\n")    # key/value line
+        print(f"✔ File created at: {output_file_path}")
+    except Exception as e:
+        print(f" Error: {e}")
+
 
 #############################################################################
 

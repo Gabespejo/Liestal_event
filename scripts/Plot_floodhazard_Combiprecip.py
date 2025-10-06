@@ -85,11 +85,11 @@ def main():
     plot_deterministic_perhour(
         case_name=case,
         dem_file=dem_file,
-        wd_folder=wd_dir,  # 👈 subfolder with .wd
+        wd_folder=wd_dir,  #  subfolder with .wd
         plot_output_folder=output_folder,
         lead_times_hours=lead_times_hours,
         initial_datetime_str=args.initial_datetime if args.initial_datetime else None,
-        forecast_times=forecast_times,  # 👈 NEW
+        forecast_times=forecast_times,  #  NEW
         color1=args.color1,
         color2=args.color2,
         color3=args.color3,

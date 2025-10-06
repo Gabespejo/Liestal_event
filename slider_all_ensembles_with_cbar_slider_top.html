@@ -1,10 +1,10 @@
-
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <title>Zell – Only Rainfall vs Rainfall + Discharge</title>
+  <meta charset="UTF-8" />
+  <title>COSMO Ensembles + Combiprecip (4×3)</title>
   <style>
+    :root { --panel-w: 360px; }
     body {
       font-family: Arial, sans-serif;
       background-color: #f7f7f7;
@@ -13,48 +13,51 @@
     }
     .slider-container {
       text-align: center;
-      padding: 10px;
+      padding: 10px 10px 0 10px;
       background-color: #eeeeee;
       position: sticky;
       top: 0;
-      z-index: 10;
+      z-index: 2;
     }
-    input[type=range] {
+    .slider-container input[type=range] {
       width: 40%;
       height: 25px;
+    }
+    .slider-labels {
+      margin: 6px 0 10px 0;
+      font-size: 14px;
+      color: #333;
     }
     .wrapper {
       display: flex;
       flex-direction: row;
-      height: calc(100vh - 60px);
+      height: calc(100vh - 80px);
     }
     .grid {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      align-items: flex-start;
-      gap: 20px;
-      padding: 20px;
       flex-grow: 1;
-      overflow-y: auto;
+      overflow: auto;
+      padding: 16px;
+    }
+    .grid-inner {
+      display: grid;
+      grid-template-columns: repeat(4, var(--panel-w));
+      gap: 18px;
+      justify-content: center;
     }
     .panel {
-      width: 48%;
-      min-width: 320px;
+      width: var(--panel-w);
       background: #fff;
       padding: 12px;
       border-radius: 10px;
       box-shadow: 0 2px 8px rgba(0,0,0,.08);
     }
+    .panel h4 { margin: 6px 0 8px 0; font-size: 14px; font-weight: 600; }
     .panel img {
       max-width: 100%;
       height: auto;
       border: 1px solid #ccc;
+      background: #fff;
       border-radius: 6px;
-    }
-    .panel h4 {
-      font-size: 14px;
-      margin: 5px 0 10px 0;
     }
     .side-panel {
       width: 120px;
@@ -65,77 +68,133 @@
       background-color: #eeeeee;
       padding: 10px;
     }
-    .side-panel img {
-      width: 80px;
-      margin-top: 10px;
-    }
-    .step-label {
-      font-weight: 600;
-    }
+    .side-panel img { width: 80px; margin-top: 10px; }
+    .dim { color: #666; font-weight: normal; }
   </style>
 </head>
 <body>
 
 <div class="slider-container">
   <div>
-    <span class="step-label">Step:</span>
-    <span id="stepTxt">0000</span>
+    <label for="leadSlider"><strong>Lead Time</strong> (ensembles): </label>
+    <input type="range" min="0" max="8" value="0" id="leadSlider">
   </div>
-  <input type="range" min="0" max="12" value="0" id="leadSlider">
+  <div class="slider-labels">
+    Ensembles show <code>lead_time1..9</code>. Combiprecip shows <code>lead_time4..12</code> (offset +3).
+  </div>
 </div>
 
 <div class="wrapper">
   <div class="grid">
-    <!-- LEFT: Only rainfall -->
-    <div class="panel">
-      <h4>Only rainfall</h4>
-      <img id="img_left" src="ZELL_PLOTS/Zell_2m_Combiprecip/Zell_2m-0000_nocbar.png" alt="Only rainfall">
-    </div>
+    <div class="grid-inner">
+      <!-- 11 ensemble panels -->
+      <div class="panel">
+        <h4>Ensemble 1 <span class="dim">(r1)</span></h4>
+        <img id="img_r1" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r1_lead_time1_zoom.png" alt="Ensemble r1">
+      </div>
+      <div class="panel">
+        <h4>Ensemble 2 <span class="dim">(r2)</span></h4>
+        <img id="img_r2" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r2_lead_time1_zoom.png" alt="Ensemble r2">
+      </div>
+      <div class="panel">
+        <h4>Ensemble 3 <span class="dim">(r3)</span></h4>
+        <img id="img_r3" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r3_lead_time1_zoom.png" alt="Ensemble r3">
+      </div>
+      <div class="panel">
+        <h4>Ensemble 4 <span class="dim">(r4)</span></h4>
+        <img id="img_r4" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r4_lead_time1_zoom.png" alt="Ensemble r4">
+      </div>
 
-    <!-- RIGHT: Rainfall + discharge -->
-    <div class="panel">
-      <h4>Only rainfall + Discharge</h4>
-      <img id="img_right" src="ZELL_PLOTS/Zell_2m_bach_Combiprecip/Zell_2m_bach-0000_nocbar.png" alt="Rainfall + discharge">
-    </div>
-  </div>
+      <div class="panel">
+        <h4>Ensemble 5 <span class="dim">(r5)</span></h4>
+        <img id="img_r5" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r5_lead_time1_zoom.png" alt="Ensemble r5">
+      </div>
+      <div class="panel">
+        <h4>Ensemble 6 <span class="dim">(r6)</span></h4>
+        <img id="img_r6" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r6_lead_time1_zoom.png" alt="Ensemble r6">
+      </div>
+      <div class="panel">
+        <h4>Ensemble 7 <span class="dim">(r7)</span></h4>
+        <img id="img_r7" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r7_lead_time1_zoom.png" alt="Ensemble r7">
+      </div>
+      <div class="panel">
+        <h4>Ensemble 8 <span class="dim">(r8)</span></h4>
+        <img id="img_r8" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r8_lead_time1_zoom.png" alt="Ensemble r8">
+      </div>
+
+      <div class="panel">
+        <h4>Ensemble 9 <span class="dim">(r9)</span></h4>
+        <img id="img_r9" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r9_lead_time1_zoom.png" alt="Ensemble r9">
+      </div>
+      <div class="panel">
+        <h4>Ensemble 10 <span class="dim">(r10)</span></h4>
+        <img id="img_r10" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r10_lead_time1_zoom.png" alt="Ensemble r10">
+      </div>
+      <div class="panel">
+        <h4>Ensemble 11 <span class="dim">(r11)</span></h4>
+        <img id="img_r11" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r11_lead_time1_zoom.png" alt="Ensemble r11">
+      </div>
+
+      <!-- Panel 12: Combiprecip (deterministic) -->
+      <div class="panel">
+        <h4>Combiprecip <span class="dim">(deterministic)</span></h4>
+        <img id="img_combi" src="ZELL_PLOTS/Zell_2m_Combiprecip/wd_det_lead_time4_zoom.png" alt="Combiprecip det">
+      </div>
+    </div> <!-- grid-inner -->
+  </div>   <!-- grid -->
 
   <div class="side-panel">
     <img src="water_depth_cbar_vertical.png" alt="Colorbar">
   </div>
-</div>
+</div>  <!-- wrapper -->
 
 <script>
-  // Steps 0000..0012
-  const steps = Array.from({length: 13}, (_, i) => String(i).padStart(4, "0"));
-  const slider = document.getElementById("leadSlider");
-  const stepTxt = document.getElementById("stepTxt");
-  const leftImg = document.getElementById("img_left");
-  const rightImg = document.getElementById("img_right");
+  // COSMO: lead_time 1..9 (slider indexes 0..8)
+  const leadEns = [1,2,3,4,5,6,7,8,9];
+  // Combiprecip uses lead_time (L + 3) => 4..12
+  const leadOffsetCombi = 3;
 
-  const leftDir = "ZELL_PLOTS/Zell_2m_Combiprecip";
-  const rightDir = "ZELL_PLOTS/Zell_2m_bach_Combiprecip";
-  const leftPrefix = "Zell_2m-";
-  const rightPrefix = "Zell_2m_bach-";
-  const suffix = "_nocbar.png";
+  const cosmoDir = "ZELL_PLOTS/Zell_2m_COSMO";
+  const combiDir = "ZELL_PLOTS/Zell_2m_Combiprecip";
 
-  function setStep(i){
-    i = Math.max(0, Math.min(steps.length-1, Number(i)||0));
-    const s = steps[i];
-    stepTxt.textContent = s;
-    // Cache-bust with ?v= to avoid stale images
-    leftImg.src  = `${leftDir}/${leftPrefix}${s}${suffix}?v=${s}`;
-    rightImg.src = `${rightDir}/${rightPrefix}${s}${suffix}?v=${s}`;
-    slider.value = i;
+  const ensembleIds = ["img_r1","img_r2","img_r3","img_r4","img_r5","img_r6","img_r7","img_r8","img_r9","img_r10","img_r11"];
+  const rNums       = [1,2,3,4,5,6,7,8,9,10,11];
+
+  function setImages(idx) {
+    if (idx < 0) idx = 0;
+    if (idx > leadEns.length - 1) idx = leadEns.length - 1;
+
+    const L  = leadEns[idx];
+    const Lc = L + leadOffsetCombi;
+
+    // Update ensemble panels
+    for (let i = 0; i < ensembleIds.length; i++) {
+      const id = ensembleIds[i];
+      const r  = rNums[i];
+      const src = `${cosmoDir}/wd_r${r}_lead_time${L}_zoom.png`;
+      const img = document.getElementById(id);
+      if (img) img.src = src;
+    }
+
+    // Update combiprecip
+    const combi = document.getElementById("img_combi");
+    if (combi) {
+      combi.src = `${combiDir}/wd_det_lead_time${Lc}_zoom.png`;
+    }
   }
 
-  slider.addEventListener("input", e => setStep(e.target.value));
+  const slider = document.getElementById("leadSlider");
+  slider.addEventListener("input", e => setImages(parseInt(e.target.value, 10)));
+
   // Optional: keyboard arrows
   window.addEventListener("keydown", e => {
-    if (e.key === "ArrowRight") setStep(Number(slider.value)+1);
-    if (e.key === "ArrowLeft")  setStep(Number(slider.value)-1);
+    if (e.key === "ArrowRight") setImages(parseInt(slider.value, 10) + 1);
+    if (e.key === "ArrowLeft")  setImages(parseInt(slider.value, 10) - 1);
   });
 
-  setStep(0);
+  // initialize
+  setImages(parseInt(slider.value, 10));
 </script>
 </body>
 </html>
+

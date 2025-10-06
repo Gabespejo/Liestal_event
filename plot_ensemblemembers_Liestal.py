@@ -1,101 +1,212 @@
-# generate_slider_html.py
-import os, pathlib
+import os
+from pathlib import Path
 
-# --- Config (filenames like 0000..0012) ---
-time_steps = [f"{i:04d}" for i in range(13)]  # 0000..0012
-left_dir  = "ZELL_PLOTS/Zell_2m_Combiprecip"        # Only rainfall
-right_dir = "ZELL_PLOTS/Zell_2m_bach_Combiprecip"   # Rainfall + discharge
-left_prefix, right_prefix = "Zell_2m-", "Zell_2m_bach-"
-image_suffix = "_nocbar.png"
+# ================== CONFIG ==================
+cosmo_dir = "ZELL_PLOTS/Zell_2m_COSMO"
+combi_dir = "ZELL_PLOTS/Zell_2m_Combiprecip"
 
-# Write the page at the REPO ROOT (GitHub Pages folder = root)
-output_html = "index.html"
+ensembles = list(range(1, 12))           # r1..r11
+lead_times_ens = list(range(1, 10))      # lead_time1..lead_time9
+# combi maps slider i -> lead_time (i + 3) => 4..12
+lead_offset_combi = 3
 
-html = f"""<!doctype html>
+# Output
+output_html = "slider_cosmo11_plus_combiprecip_4x3.html"
+# ============================================
+
+max_idx = len(lead_times_ens) - 1
+
+html_start = f"""
+<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <title>Zell – Only Rainfall vs Rainfall + Discharge</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="UTF-8" />
+  <title>COSMO Ensembles + Combiprecip (4×3)</title>
   <style>
-    body {{ margin:0; font-family: Arial, sans-serif; background:#f7f7f7; }}
-    .slider-container {{ text-align:center; padding:10px; background:#eee; position:sticky; top:0; z-index:10; }}
-    input[type=range] {{ width:40%; height:25px; }}
-    .wrapper {{ display:flex; flex-direction:row; height:calc(100vh - 60px); }}
-    .grid {{ display:flex; flex-wrap:wrap; justify-content:center; align-items:flex-start; gap:20px; padding:20px; flex-grow:1; overflow-y:auto; }}
-    .panel {{ width:48%; min-width:320px; background:#fff; padding:12px; border-radius:10px; box-shadow:0 2px 8px rgba(0,0,0,.08); }}
-    .panel h4 {{ font-size:14px; margin:5px 0 10px 0; }}
-    .panel img {{ max-width:100%; height:auto; border:1px solid #ccc; border-radius:6px; }}
-    .side-panel {{ width:120px; display:flex; flex-direction:column; align-items:center; justify-content:center; background:#eee; padding:10px; }}
-    .side-panel img {{ width:80px; margin-top:10px; }}
-    .step-label {{ font-weight:600; }}
+    :root {{
+      --panel-w: 360px;
+    }}
+    body {{
+      font-family: Arial, sans-serif;
+      background-color: #f7f7f7;
+      margin: 0;
+      padding: 0;
+    }}
+    .slider-container {{
+      text-align: center;
+      padding: 10px 10px 0 10px;
+      background-color: #eeeeee;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }}
+    .slider-container input[type=range] {{
+      width: 40%;
+      height: 25px;
+    }}
+    .slider-labels {{
+      margin: 6px 0 10px 0;
+      font-size: 14px;
+      color: #333;
+    }}
+    .wrapper {{
+      display: flex;
+      flex-direction: row;
+      height: calc(100vh - 80px);
+    }}
+    .grid {{
+      flex-grow: 1;
+      overflow: auto;
+      padding: 16px;
+    }}
+    .grid-inner {{
+      display: grid;
+      grid-template-columns: repeat(4, var(--panel-w));
+      gap: 18px;
+      justify-content: center;
+    }}
+    .panel {{
+      width: var(--panel-w);
+    }}
+    .panel h4 {{
+      margin: 6px 0 8px 0;
+      font-size: 14px;
+      font-weight: 600;
+    }}
+    .panel img {{
+      max-width: 100%;
+      height: auto;
+      border: 1px solid #ccc;
+      background: #fff;
+    }}
+    .side-panel {{
+      width: 120px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background-color: #eeeeee;
+      padding: 10px;
+    }}
+    .side-panel img {{
+      width: 80px;
+      margin-top: 10px;
+    }}
+    .dim {{
+      color: #666;
+      font-weight: normal;
+    }}
   </style>
 </head>
 <body>
 
 <div class="slider-container">
-  <div><span class="step-label">Step:</span> <span id="stepTxt">{time_steps[0]}</span></div>
-  <input type="range" min="0" max="{len(time_steps)-1}" value="0" id="leadSlider">
+  <div>
+    <label for="leadSlider"><strong>Lead Time</strong> (ensembles): </label>
+    <input type="range" min="0" max="{max_idx}" value="0" id="leadSlider">
+  </div>
+  <div class="slider-labels">
+    Ensembles show <code>lead_time1..9</code>. Combiprecip panel shows <code>lead_time4..12</code> (offset +3).
+  </div>
 </div>
 
 <div class="wrapper">
   <div class="grid">
-    <div class="panel">
-      <h4>Only rainfall</h4>
-      <img id="img_left" src="{left_dir}/{left_prefix}{time_steps[0]}{image_suffix}" alt="Only rainfall">
-    </div>
-    <div class="panel">
-      <h4>Only rainfall + Discharge</h4>
-      <img id="img_right" src="{right_dir}/{right_prefix}{time_steps[0]}{image_suffix}" alt="Rainfall + discharge">
-    </div>
-  </div>
+    <div class="grid-inner">
+"""
 
-  <!-- keep this image next to index.html or change the path -->
+# Panels 1..11: ensembles
+panels = []
+for r in ensembles:
+    # default image at first slider position (lead_time1)
+    first_L = lead_times_ens[0]
+    src = os.path.join(
+        cosmo_dir,
+        f"wd_r{r}_lead_time{first_L}_zoom.png"
+    )
+    panels.append(f"""
+      <div class="panel">
+        <h4>Ensemble {r} <span class="dim">(r{r})</span></h4>
+        <img id="img_r{r}" src="{src}" alt="Ensemble r{r}">
+      </div>
+    """)
+
+# Panel 12: Combiprecip deterministic (maps L -> L+3)
+first_combi = lead_times_ens[0] + lead_offset_combi
+src_combi = os.path.join(
+    combi_dir,
+    f"wd_det_lead_time{first_combi}_zoom.png"
+)
+panels.append(f"""
+      <div class="panel">
+        <h4>Combiprecip <span class="dim">(deterministic)</span></h4>
+        <img id="img_combi" src="{src_combi}" alt="Combiprecip det">
+      </div>
+""")
+
+html_mid = "\n".join(panels)
+
+side_panel = """
+    </div> <!-- grid-inner -->
+  </div>   <!-- grid -->
   <div class="side-panel">
     <img src="water_depth_cbar_vertical.png" alt="Colorbar">
   </div>
-</div>
+</div>  <!-- wrapper -->
+"""
 
+# JS
+# Build arrays for the slider mapping
+lead_times_js = "[" + ",".join(str(L) for L in lead_times_ens) + "]"
+script = f"""
 <script>
-  const steps = {time_steps};
-  const slider = document.getElementById("leadSlider");
-  const stepTxt = document.getElementById("stepTxt");
-  const leftImg = document.getElementById("img_left");
-  const rightImg = document.getElementById("img_right");
+  const leadEns = {lead_times_js};        // [1..9]
+  const leadOffsetCombi = {lead_offset_combi}; // +3 -> 4..12
 
-  const leftDir = "{left_dir}";
-  const rightDir = "{right_dir}";
-  const leftPrefix = "{left_prefix}";
-  const rightPrefix = "{right_prefix}";
-  const suffix = "{image_suffix}";
+  const cosmoDir = "{cosmo_dir}".replace(/\\\\/g, "/");
+  const combiDir = "{combi_dir}".replace(/\\\\/g, "/");
 
-  function setStep(i){{
-    i = Math.max(0, Math.min(steps.length-1, Number(i)||0));
-    const s = steps[i];
-    stepTxt.textContent = s;
-    leftImg.src  = `${{leftDir}}/${{leftPrefix}}${{s}}${{suffix}}?v=${{s}}`;
-    rightImg.src = `${{rightDir}}/${{rightPrefix}}${{s}}${{suffix}}?v=${{s}}`;
-    slider.value = i;
+  const ensembleIds = [{",".join(f'"img_r{r}"' for r in ensembles)}];
+  const rNums       = [{",".join(str(r) for r in ensembles)}];
+
+  function setImages(idx) {{
+    if (idx < 0) idx = 0;
+    if (idx > leadEns.length - 1) idx = leadEns.length - 1;
+
+    const L = leadEns[idx];              // ensembles lead_time
+    const Lc = L + leadOffsetCombi;      // combiprecip lead_time
+
+    // Update ensemble panels
+    for (let i = 0; i < ensembleIds.length; i++) {{
+      const id = ensembleIds[i];
+      const r  = rNums[i];
+      const src = `${{cosmoDir}}/wd_r${{r}}_lead_time${{L}}_zoom.png`;
+      const img = document.getElementById(id);
+      if (img) img.src = src;
+    }}
+
+    // Update combiprecip
+    const combi = document.getElementById("img_combi");
+    if (combi) {{
+      combi.src = `${{combiDir}}/wd_det_lead_time${{Lc}}_zoom.png`;
+    }}
   }}
 
-  slider.addEventListener("input", e => setStep(e.target.value));
-  window.addEventListener("keydown", e => {{
-    if (e.key === "ArrowRight") setStep(Number(slider.value)+1);
-    if (e.key === "ArrowLeft")  setStep(Number(slider.value)-1);
-  }});
+  const slider = document.getElementById("leadSlider");
+  slider.addEventListener("input", e => setImages(parseInt(e.target.value, 10)));
 
-  setStep(0);
+  // initialize
+  setImages(parseInt(slider.value, 10));
 </script>
+"""
+
+html_end = """
 </body>
 </html>
 """
 
-with open(output_html, "w", encoding="utf-8") as f:
-    f.write(html)
+full_html = html_start + html_mid + side_panel + script + html_end
 
-print("✅ HTML saved to:", pathlib.Path(output_html).resolve())
-print("📂 Expected images (case-sensitive):")
-print("   ZELL_PLOTS/Zell_2m_Combiprecip/Zell_2m-0000_nocbar.png … 0012")
-print("   ZELL_PLOTS/Zell_2m_bach_Combiprecip/Zell_2m_bach-0000_nocbar.png … 0012")
-print("ℹ️ Put water_depth_cbar_vertical.png next to index.html or adjust its path.")
+Path(output_html).write_text(full_html, encoding="utf-8")
+print(Path(output_html).resolve())
 

@@ -1,9 +1,13 @@
-
+from typing import Dict
+from typing import Dict, List, Tuple
+import os, re, glob
+import numpy as np
+import xarray as xr
+import rioxarray as rxr
 
 ########## PLOTTING ############################################ 
 
 import os
-import numpy as np
 import matplotlib.pyplot as plt
 import rasterio
 from rasterio.warp import reproject, Resampling
@@ -1683,7 +1687,7 @@ def plot_deterministic_perhour(
     plot_output_folder,
     lead_times_hours,
     initial_datetime_str=None,
-    forecast_times=None,   # 👈 NEW: observational times
+    forecast_times=None,   #  NEW: observational times
     color1="violet",
     color2="mediumvioletred",
     color3="darkmagenta",
@@ -1848,112 +1852,552 @@ def plot_deterministic_perhour(
 
 ################################################################################################
 ######################## ASCII in netcdfile ###############################################
-
-# deps: rioxarray, xarray, netCDF4 (and rasterio via rioxarray)
-from typing import Dict, Sequence
-import glob, os, re
+import os, re
+import numpy as np
 import xarray as xr
 import rioxarray as rxr
 
-def ascii_stack_to_netcdf(
-    inputs: str | Sequence[str],
-    out_nc: str,
+def ascii_single_member_to_netcdf(
     *,
+    out_nc: str,
+    folder: str,
+    base: str,
+    start: int,
+    end: int,
+    width: int = 4,
+    # map output variable names -> LISFLOOD file extensions
+    var_map: dict[str, str] | None = None,
     crs: str = "EPSG:2056",
-    var_name: str = "water_depth",
     nodata: float | None = None,
     dtype: str = "float32",
     complevel: int = 4,
-    step_regex: str = r"-(\d{4})\.(?:wd|asc)$",   # capture 4-digit step by default
-    chunks: Dict[str, int] | None = None,
-    use_nan_fill: bool = False,
+    chunks: dict | None = None,
+    step_regex: str = r"-(\d{4})\.(?:\w+)$",
     strict_align: bool = True,
-    drop_single_step: bool = True,                # write 2-D if only one file
+    use_nan_fill: bool = False,
+    wet_threshold: float = 0.0,          # mask derived fields where wd < threshold
+    skip_missing: bool = False,
+    dim_name: str = "lead_time",         # time-like dimension name
+    time_units: str = "hour",            # attribute for that coord
+    realization: int | None = None,      # if you want a 1-length realization dim
 ) -> str:
     """
-    Convert one or many ESRI ASCII grids (*.wd/*.asc) to a CF-friendly NetCDF.
+    Read *one* LISFLOOD ensemble member (wd, Vx, Vy, Qx, Qy) over indices
+    [start..end], write a CF-ish NetCDF with derived, cell-centred fields.
 
-    `inputs` can be a glob pattern (str) or an explicit list/tuple of file paths.
+    Output dims:
+      - (lead_time, y, x)  or
+      - (realization, lead_time, y, x) if `realization` is provided.
+
+    Robustness:
+      - Tolerates per-time shape mismatches within each variable by harmonizing
+        every slice to that variable’s first slice shape before stacking.
+      - Later aligns face grids to the water_depth grid.
     """
-    # Resolve inputs -> files
-    if isinstance(inputs, (list, tuple)):
-        files = list(inputs)
-    else:
-        files = sorted(glob.glob(inputs))
-    if not files:
-        raise FileNotFoundError(f"No input files found from: {inputs!r}")
+
+    # -------------------- embedded helpers --------------------
 
     def _open_ascii(path: str) -> xr.DataArray:
+        """Open ESRI ASCII as 2-D (y,x) DataArray."""
         try:
-            return rxr.open_rasterio(path, masked=True, chunks=chunks).squeeze("band", drop=True)
+            da = rxr.open_rasterio(path, masked=True, chunks=chunks)
         except Exception:
-            # fallback: force AAIGrid in case the .wd extension confuses GDAL
-            return rxr.open_rasterio(path, masked=True, chunks=chunks, driver="AAIGrid").squeeze("band", drop=True)
+            da = rxr.open_rasterio(path, masked=True, chunks=chunks, driver="AAIGrid")
+        return da.squeeze("band", drop=True)
 
+    def _build_range(ext: str) -> list[str]:
+        return [os.path.join(folder, f"{base}-{i:0{width}d}.{ext}") for i in range(start, end + 1)]
+
+    def _match_axis_len(arr: xr.DataArray, target_len: int, axis_name: str) -> xr.DataArray:
+        """Pad/trim array along axis_name to target_len using edge values."""
+        cur = arr.sizes[axis_name]
+        if cur == target_len:
+            return arr
+        if cur == target_len - 1:  # pad both ends then trim
+            first = arr.isel({axis_name: 0})
+            last  = arr.isel({axis_name: cur - 1})
+            arr = xr.concat(
+                [first.expand_dims({axis_name: [0]}), arr, last.expand_dims({axis_name: [0]})],
+                dim=axis_name
+            )
+            return arr.isel({axis_name: slice(0, target_len)})
+        if cur == target_len + 1:  # chop outer faces
+            return arr.isel({axis_name: slice(1, cur - 1)})
+        if cur > target_len:       # center-trim
+            off = (cur - target_len) // 2
+            return arr.isel({axis_name: slice(off, off + target_len)})
+        # cur < target_len: symmetric pad
+        need = target_len - cur
+        left_n = need // 2
+        right_n = need - left_n
+        left_block = xr.concat([arr.isel({axis_name: 0})] * left_n, dim=axis_name)
+        right_block = xr.concat([arr.isel({axis_name: cur - 1})] * right_n, dim=axis_name)
+        return xr.concat([left_block, arr, right_block], dim=axis_name)
+
+    def _harmonize_to_ref_shape(slices: list[xr.DataArray]) -> list[xr.DataArray]:
+        """Make every (y,x) slice match the first slice's shape (y0,x0)."""
+        ref_y, ref_x = slices[0].sizes["y"], slices[0].sizes["x"]
+        out = []
+        for s in slices:
+            s2 = _match_axis_len(s, ref_x, "x")
+            s2 = _match_axis_len(s2, ref_y, "y")
+            out.append(s2)
+        return out
+
+    def _stack_one_var(files: list[str], *, var_name: str) -> xr.DataArray | None:
+        """Stack a time series of ASCII rasters into (dim_name,y,x)."""
+        triplets: list[tuple[int, str, xr.DataArray]] = []
+        for f in files:
+            if not os.path.exists(f):
+                if skip_missing:
+                    continue
+                raise FileNotFoundError(f)
+            da = _open_ascii(f)
+            da.name = var_name
+            if crs:
+                da.rio.write_crs(crs, inplace=True)
+            nd = da.rio.nodata if nodata is None else nodata
+            if nd is not None:
+                da.rio.write_nodata(nd, inplace=True)
+            m = re.search(step_regex, os.path.basename(f))
+            step_val = int(m.group(1)) if m else len(triplets)
+            triplets.append((step_val, f, da))
+
+        if not triplets:
+            return None
+
+        # Sort by time index
+        triplets.sort(key=lambda t: t[0])
+        steps = [t[0] for t in triplets]
+        arrays = [t[2] for t in triplets]
+
+        # Align internal shapes across time for this variable
+        if len(arrays) > 1:
+            if strict_align:
+                # Try strict check; if any mismatch, fall back to harmonization
+                y0, x0 = arrays[0].sizes["y"], arrays[0].sizes["x"]
+                need_harmonize = any(a.sizes["y"] != y0 or a.sizes["x"] != x0 for a in arrays[1:])
+                if need_harmonize:
+                    arrays = _harmonize_to_ref_shape(arrays)
+            else:
+                arrays = _harmonize_to_ref_shape(arrays)
+
+            # Also enforce identical geotransforms by copying the first one's transform
+            # (ASCII grids with same pixel size/extent but different header rounding can differ)
+            tx0 = arrays[0].rio.transform()
+            for i in range(1, len(arrays)):
+                # rioxarray does not let us override transform directly, but since extents
+                # are consistent after harmonization, saving as a common grid is fine.
+                pass  # nothing needed if we only use pixel indices & later align to wd
+
+        stack = xr.concat(arrays, dim=dim_name).assign_coords({dim_name: (dim_name, steps)})
+        stack.name = var_name
+        return stack
+
+    def _center_x(da: xr.DataArray) -> xr.DataArray:
+        return 0.5 * (da.isel(x=slice(0, -1)) + da.isel(x=slice(1, None)))
+
+    def _center_y(da: xr.DataArray) -> xr.DataArray:
+        return 0.5 * (da.isel(y=slice(0, -1)) + da.isel(y=slice(1, None)))
+
+    # -------------------- main workflow --------------------
+
+    if var_map is None:
+        var_map = {
+            "water_depth": "wd",   # m (cell-centre)
+            "vel_x": "Vx",         # m/s (x faces: nx+1)
+            "vel_y": "Vy",         # m/s (y faces: ny+1)
+            "flux_x": "Qx",        # m3/s (x faces: nx+1)
+            "flux_y": "Qy",        # m3/s (y faces: ny+1)
+        }
+
+    # 1) stack raw variables
+    raw: dict[str, xr.DataArray] = {}
+    for vname, ext in var_map.items():
+        files = _build_range(ext)
+        da = _stack_one_var(files, var_name=vname)
+        if da is not None:
+            raw[vname] = da
+
+    if "water_depth" not in raw:
+        raise ValueError("Could not read 'water_depth' series—can't define the target grid.")
+
+    # 2) authoritative grid from water_depth
+    wd = raw["water_depth"].transpose(dim_name, "y", "x")
+    if dim_name in wd.coords:
+        wd[dim_name].attrs.setdefault("units", time_units)
+    x_wd = wd["x"].values
+    y_wd = wd["y"].values
+    nx_wd = x_wd.size
+    ny_wd = y_wd.size
+
+    def _align_to_wd_grid(da: xr.DataArray) -> xr.DataArray:
+        da = _match_axis_len(da, nx_wd, "x")
+        da = _match_axis_len(da, ny_wd, "y")
+        return da.assign_coords(x=x_wd, y=y_wd)
+
+    # 3) start dataset with coords
+    ds = xr.Dataset(coords={dim_name: wd[dim_name], "y": y_wd, "x": x_wd})
+    ds["water_depth"] = wd
+    ds["water_depth"].attrs.update(long_name="water depth", units="m")
+
+    # 4) centred components on wd grid
+    if "vel_x" in raw:
+        vx_c = _align_to_wd_grid(_center_x(raw["vel_x"].transpose(dim_name, "y", "x")))
+        ds["vel_x_c"] = vx_c
+        ds["vel_x_c"].attrs.update(long_name="cell-centred velocity x", units="m s-1")
+    if "vel_y" in raw:
+        vy_c = _align_to_wd_grid(_center_y(raw["vel_y"].transpose(dim_name, "y", "x")))
+        ds["vel_y_c"] = vy_c
+        ds["vel_y_c"].attrs.update(long_name="cell-centred velocity y", units="m s-1")
+    if "flux_x" in raw:
+        qx_c = _align_to_wd_grid(_center_x(raw["flux_x"].transpose(dim_name, "y", "x")))
+        ds["flux_x_c"] = qx_c
+        ds["flux_x_c"].attrs.update(long_name="cell-centred discharge x", units="m3 s-1")
+    if "flux_y" in raw:
+        qy_c = _align_to_wd_grid(_center_y(raw["flux_y"].transpose(dim_name, "y", "x")))
+        ds["flux_y_c"] = qy_c
+        ds["flux_y_c"].attrs.update(long_name="cell-centred discharge y", units="m3 s-1")
+
+    # 5) magnitudes from centred components
+    if ("vel_x_c" in ds) and ("vel_y_c" in ds):
+        ds["vel_mag"] = xr.apply_ufunc(np.hypot, ds["vel_x_c"], ds["vel_y_c"])
+        ds["vel_mag"].attrs.update(long_name="speed magnitude", units="m s-1")
+    if ("flux_x_c" in ds) and ("flux_y_c" in ds):
+        ds["flux_mag"] = xr.apply_ufunc(np.hypot, ds["flux_x_c"], ds["flux_y_c"])
+        ds["flux_mag"].attrs.update(long_name="discharge magnitude", units="m3 s-1")
+
+    # 6) representative per-cell scalars (avg absolute faces), aligned to wd size
+    if ("flux_x" in raw) and ("flux_y" in raw):
+        Qx = raw["flux_x"].transpose(dim_name, "y", "x")
+        Qy = raw["flux_y"].transpose(dim_name, "y", "x")
+        Qrep = (
+            np.abs(Qx.isel(x=slice(0, -1))) + np.abs(Qx.isel(x=slice(1, None))) +
+            np.abs(Qy.isel(y=slice(0, -1))) + np.abs(Qy.isel(y=slice(1, None)))
+        ) * 0.25
+        ds["discharge_cell"] = _align_to_wd_grid(Qrep)
+        ds["discharge_cell"].attrs.update(
+            long_name="representative per-cell discharge (avg |faces|)", units="m3 s-1"
+        )
+    if ("vel_x" in raw) and ("vel_y" in raw):
+        Vx = raw["vel_x"].transpose(dim_name, "y", "x")
+        Vy = raw["vel_y"].transpose(dim_name, "y", "x")
+        Srep = (
+            np.abs(Vx.isel(x=slice(0, -1))) + np.abs(Vx.isel(x=slice(1, None))) +
+            np.abs(Vy.isel(y=slice(0, -1))) + np.abs(Vy.isel(y=slice(1, None)))
+        ) * 0.25
+        ds["speed_cell"] = _align_to_wd_grid(Srep)
+        ds["speed_cell"].attrs.update(
+            long_name="representative per-cell speed (avg |faces|)", units="m s-1"
+        )
+
+    # 7) optional wet mask on derived fields
+    if wet_threshold > 0:
+        wet = ds["water_depth"] >= float(wet_threshold)
+        for vn in ["vel_x_c","vel_y_c","vel_mag","flux_x_c","flux_y_c","flux_mag","discharge_cell","speed_cell"]:
+            if vn in ds:
+                ds[vn] = ds[vn].where(wet)
+
+    # 8) CRS / nodata / fill
+    for v in ds.data_vars:
+        if crs:
+            ds[v].rio.write_crs(crs, inplace=True)
+        nd = (ds[v].rio.nodata if nodata is None else nodata)
+        if nd is not None:
+            ds[v].rio.write_nodata(nd, inplace=True)
+            if use_nan_fill:
+                ds[v] = ds[v].where(ds[v] != nd)
+
+    # realization dim (optional deterministic tagging)
+    if realization is not None:
+        ds = ds.expand_dims({"realization": [int(realization)]})
+        ds = ds.transpose("realization", dim_name, "y", "x", ...)
+
+    # clean attrs that clash with encoding
+    for v in ds.data_vars:
+        ds[v].attrs.pop("_FillValue", None)
+        ds[v].attrs.pop("missing_value", None)
+
+    # encodings
+    for v in ds.data_vars:
+        enc = dict(zlib=True, complevel=int(complevel), dtype=dtype)
+        nd = (ds[v].rio.nodata if nodata is None else nodata)
+        if (nd is not None) and (not use_nan_fill):
+            enc["_FillValue"] = float(nd)
+        ds[v].encoding = enc
+
+    ds.attrs.update(
+        Conventions="CF-1.8",
+        source="LISFLOOD single-member ASCII series, cell-centred on water_depth grid",
+        deterministic="true" if realization is None else f"realization {int(realization)}",
+    )
+    ds.to_netcdf(out_nc)
+    return out_nc
+
+
+################################################################################################
+##########################FORECAST DATA SIMULATED TO NETCDFILE##################################
+import os, re
+import numpy as np
+import xarray as xr
+import rioxarray as rxr
+
+def _open_ascii(path: str, *, chunks: dict | None) -> xr.DataArray:
+    try:
+        da = rxr.open_rasterio(path, masked=True, chunks=chunks)
+    except Exception:
+        da = rxr.open_rasterio(path, masked=True, chunks=chunks, driver="AAIGrid")
+    return da.squeeze("band", drop=True)
+
+def _build_range(folder: str, base: str, start: int, end: int, width: int, ext: str) -> list[str]:
+    return [os.path.join(folder, f"{base}-{i:0{width}d}.{ext}") for i in range(start, end + 1)]
+
+def _stack_one_var(
+    files: list[str],
+    *,
+    var_name: str,
+    crs: str | None,
+    nodata: float | None,
+    chunks: dict | None,
+    step_regex: str,
+    strict_align: bool,
+    skip_missing: bool,
+    dim_name: str = "lead_time",        # <─ NEW: stacking dimension name
+) -> xr.DataArray | None:
     triplets: list[tuple[int, str, xr.DataArray]] = []
     for f in files:
-        da = _open_ascii(f)
+        if not os.path.exists(f):
+            if skip_missing:
+                continue
+            raise FileNotFoundError(f)
+        da = _open_ascii(f, chunks=chunks)
         da.name = var_name
-
-        # Write CRS & nodata (prefer override; else from file)
         if crs:
             da.rio.write_crs(crs, inplace=True)
-        file_nodata = da.rio.nodata
-        nd = file_nodata if nodata is None else nodata
+        nd = da.rio.nodata if nodata is None else nodata
         if nd is not None:
             da.rio.write_nodata(nd, inplace=True)
-
-        # Extract step index
         m = re.search(step_regex, os.path.basename(f))
         step_val = int(m.group(1)) if m else len(triplets)
         triplets.append((step_val, f, da))
 
-    # Sort by step and unpack
+    if not triplets:
+        return None
+
     triplets.sort(key=lambda t: t[0])
     steps = [t[0] for t in triplets]
     arrays = [t[2] for t in triplets]
 
-    # Alignment checks
     if strict_align and len(arrays) > 1:
         ref = arrays[0]
         ref_shape = tuple(ref.shape)
-        ref_transform = ref.rio.transform()
-        for s, fname, da in triplets:
+        ref_tx = ref.rio.transform()
+        for _, fn, da in triplets:
             if tuple(da.shape) != ref_shape:
-                raise ValueError(f"Shape mismatch in {fname}: {tuple(da.shape)} vs {ref_shape}")
-            if da.rio.transform() != ref_transform:
-                raise ValueError(f"Geotransform mismatch in {fname}; rasters must align exactly.")
+                raise ValueError(f"[{var_name}] shape mismatch: {fn}")
+            if da.rio.transform() != ref_tx:
+                raise ValueError(f"[{var_name}] geotransform mismatch: {fn}")
 
-    # Stack (or single)
-    stack = xr.concat(arrays, dim="step").assign_coords(step=("step", steps))
+    # use dim_name instead of "step"
+    stack = xr.concat(arrays, dim=dim_name).assign_coords({dim_name: (dim_name, steps)})
+    stack.name = var_name
+    return stack
 
-    # Replace nodata with NaN if requested
-    chosen_nodata = stack.rio.nodata
-    if use_nan_fill and chosen_nodata is not None:
-        stack = stack.where(stack != chosen_nodata)
-        fill_value = None
-    else:
-        fill_value = chosen_nodata
+def ascii_ensemble_to_netcdf(
+    *,
+    out_nc: str,
+    folder: str,
+    base: str,
+    start: int,
+    end: int,
+    width: int = 4,
+    var_map: dict[str, str] | None = None,   # {out_name: extension}
+    crs: str = "EPSG:2056",
+    nodata: float | None = None,
+    dtype: str = "float32",
+    complevel: int = 4,
+    chunks: dict | None = None,
+    step_regex: str = r"-(\d{4})\.(?:\w+)$",
+    strict_align: bool = True,
+    use_nan_fill: bool = False,
+    realization: int | None = None,
+    wet_threshold: float = 0.0,
+    skip_missing: bool = False,
+    dim_name: str = "lead_time",             # <─ NEW: stacking dimension name
+) -> str:
+    """
+    Stack LISFLOOD ASCII outputs (wd, Vx, Vy, Qx, Qy) into one NetCDF and
+    derive per-cell discharge/velocity by centring face values.
+    All outputs are forced to match water_depth's (y,x) size exactly.
 
-    # Optionally drop step for single-file input -> produce 2-D (y,x)
-    if drop_single_step and stack.sizes.get("step", 1) == 1:
-        stack = stack.isel(step=0, drop=True)
+    Output dims:
+      - (lead_time, y, x)  or
+      - (realization, lead_time, y, x) if `realization` is provided.
+    """
+    if var_map is None:
+        var_map = {
+            "water_depth": "wd",   # m (cell-centre)
+            "vel_x": "Vx",         # m/s (x faces: nx+1)
+            "vel_y": "Vy",         # m/s (y faces: ny+1)
+            "flux_x": "Qx",        # m3/s (x faces: nx+1)
+            "flux_y": "Qy",        # m3/s (y faces: ny+1)
+        }
 
-    # Minimal CF metadata; rioxarray will include `spatial_ref`
-    stack.attrs.update({"Conventions": "CF-1.8", "source": "Converted from ESRI ASCII grid"})
-    # ensure grid_mapping attribute lives on the variable
-    stack.attrs.setdefault("grid_mapping", "spatial_ref")
+    # 1) stack raw variables
+    raw: dict[str, xr.DataArray] = {}
+    for vname, ext in var_map.items():
+        files = _build_range(folder, base, start, end, width, ext)
+        da = _stack_one_var(
+            files,
+            var_name=vname,
+            crs=crs,
+            nodata=nodata,
+            chunks=chunks,
+            step_regex=step_regex,
+            strict_align=strict_align,
+            skip_missing=skip_missing,
+            dim_name=dim_name,          # <─ pass through
+        )
+        if da is not None:
+            raw[vname] = da
+    if not raw:
+        raise FileNotFoundError("No variables were read (nothing to stack).")
 
-    # --- IMPORTANT: avoid clash between attrs['_FillValue'] and encoding['_FillValue']
-    if "_FillValue" in stack.attrs:
-        stack.attrs.pop("_FillValue", None)
+    # 2) authoritative grid from water_depth
+    if "water_depth" not in raw:
+        raise ValueError("`water_depth` is required to define the target cell grid size.")
+    wd = raw["water_depth"].transpose(dim_name, "y", "x")
+    x_wd = wd["x"].values
+    y_wd = wd["y"].values
+    nx_wd = x_wd.size
+    ny_wd = y_wd.size
 
-    # Encoding
-    enc = {stack.name: dict(zlib=bool(complevel), complevel=int(complevel), dtype=dtype)}
-    if fill_value is not None:
-        enc[stack.name]["_FillValue"] = float(fill_value)
+    # helpers
+    def _center_x(da: xr.DataArray) -> xr.DataArray:
+        return 0.5 * (da.isel(x=slice(0, -1)) + da.isel(x=slice(1, None)))
 
-    # Write
-    stack.astype(dtype).to_netcdf(out_nc, encoding=enc)
+    def _center_y(da: xr.DataArray) -> xr.DataArray:
+        return 0.5 * (da.isel(y=slice(0, -1)) + da.isel(y=slice(1, None)))
+
+    def _match_axis_len(arr: xr.DataArray, target_len: int, axis_name: str) -> xr.DataArray:
+        cur = arr.sizes[axis_name]
+        if cur == target_len:
+            return arr
+        if cur == target_len - 1:
+            first = arr.isel({axis_name: 0})
+            last  = arr.isel({axis_name: cur - 1})
+            arr = xr.concat(
+                [first.expand_dims({axis_name: [0]}), arr, last.expand_dims({axis_name: [0]})],
+                dim=axis_name
+            )
+            return arr.isel({axis_name: slice(0, target_len)})
+        if cur == target_len + 1:
+            return arr.isel({axis_name: slice(1, cur - 1)})
+        if cur > target_len:
+            off = (cur - target_len) // 2
+            return arr.isel({axis_name: slice(off, off + target_len)})
+        need = target_len - cur
+        left_n = need // 2
+        right_n = need - left_n
+        left_block = xr.concat([arr.isel({axis_name: 0})] * left_n, dim=axis_name)
+        right_block = xr.concat([arr.isel({axis_name: cur - 1})] * right_n, dim=axis_name)
+        return xr.concat([left_block, arr, right_block], dim=axis_name)
+
+    def _align_to_wd_grid(da: xr.DataArray) -> xr.DataArray:
+        da = _match_axis_len(da, nx_wd, "x")
+        da = _match_axis_len(da, ny_wd, "y")
+        return da.assign_coords(x=x_wd, y=y_wd)
+
+    # 3) start dataset with lead_time coord
+    ds = xr.Dataset(coords={dim_name: wd[dim_name], "y": y_wd, "x": x_wd})
+    ds["water_depth"] = wd
+
+    # 4) centred components on wd grid
+    if "vel_x" in raw:
+        vx_c = _align_to_wd_grid(_center_x(raw["vel_x"].transpose(dim_name, "y", "x")))
+        ds["vel_x_c"] = vx_c
+        ds["vel_x_c"].attrs.update(long_name="cell-centred velocity x", units="m s-1")
+    if "vel_y" in raw:
+        vy_c = _align_to_wd_grid(_center_y(raw["vel_y"].transpose(dim_name, "y", "x")))
+        ds["vel_y_c"] = vy_c
+        ds["vel_y_c"].attrs.update(long_name="cell-centred velocity y", units="m s-1")
+    if "flux_x" in raw:
+        qx_c = _align_to_wd_grid(_center_x(raw["flux_x"].transpose(dim_name, "y", "x")))
+        ds["flux_x_c"] = qx_c
+        ds["flux_x_c"].attrs.update(long_name="cell-centred discharge x", units="m3 s-1")
+    if "flux_y" in raw:
+        qy_c = _align_to_wd_grid(_center_y(raw["flux_y"].transpose(dim_name, "y", "x")))
+        ds["flux_y_c"] = qy_c
+        ds["flux_y_c"].attrs.update(long_name="cell-centred discharge y", units="m3 s-1")
+
+    # 5) direction-aware magnitudes (from centred components)
+    if ("vel_x_c" in ds) and ("vel_y_c" in ds):
+        ds["vel_mag"] = xr.apply_ufunc(np.hypot, ds["vel_x_c"], ds["vel_y_c"])
+        ds["vel_mag"].attrs.update(long_name="cell-centred speed (|vector|)", units="m s-1")
+    if ("flux_x_c" in ds) and ("flux_y_c" in ds):
+        ds["flux_mag"] = xr.apply_ufunc(np.hypot, ds["flux_x_c"], ds["flux_y_c"])
+        ds["flux_mag"].attrs.update(long_name="cell-centred discharge magnitude (|vector|)", units="m3 s-1")
+
+    # 6) representative per-cell scalars (avg |faces|), aligned to wd size
+    if ("flux_x" in raw) and ("flux_y" in raw):
+        Qx = raw["flux_x"].transpose(dim_name, "y", "x")
+        Qy = raw["flux_y"].transpose(dim_name, "y", "x")
+        Qrep = (
+            np.abs(Qx.isel(x=slice(0, -1))) + np.abs(Qx.isel(x=slice(1, None))) +
+            np.abs(Qy.isel(y=slice(0, -1))) + np.abs(Qy.isel(y=slice(1, None)))
+        ) * 0.25
+        ds["discharge_cell"] = _align_to_wd_grid(Qrep)
+        ds["discharge_cell"].attrs.update(
+            long_name="representative per-cell discharge (avg |faces|)", units="m3 s-1"
+        )
+    if ("vel_x" in raw) and ("vel_y" in raw):
+        Vx = raw["vel_x"].transpose(dim_name, "y", "x")
+        Vy = raw["vel_y"].transpose(dim_name, "y", "x")
+        Srep = (
+            np.abs(Vx.isel(x=slice(0, -1))) + np.abs(Vx.isel(x=slice(1, None))) +
+            np.abs(Vy.isel(y=slice(0, -1))) + np.abs(Vy.isel(y=slice(1, None)))
+        ) * 0.25
+        ds["speed_cell"] = _align_to_wd_grid(Srep)
+        ds["speed_cell"].attrs.update(
+            long_name="representative per-cell speed (avg |faces|)", units="m s-1"
+        )
+
+    # 7) optional wet mask
+    if wet_threshold > 0:
+        wet = ds["water_depth"] >= float(wet_threshold)
+        for vn in ["vel_x_c","vel_y_c","vel_mag","flux_x_c","flux_y_c","flux_mag","discharge_cell","speed_cell"]:
+            if vn in ds:
+                ds[vn] = ds[vn].where(wet)
+
+    # 8) CRS / nodata / fill
+    for v in ds.data_vars:
+        if crs:
+            ds[v].rio.write_crs(crs, inplace=True)
+        nd = (ds[v].rio.nodata if nodata is None else nodata)
+        if nd is not None:
+            ds[v].rio.write_nodata(nd, inplace=True)
+            if use_nan_fill:
+                ds[v] = ds[v].where(ds[v] != nd)
+
+    # realization dim
+    if realization is not None:
+        ds = ds.expand_dims({"realization": [int(realization)]})
+        ds = ds.transpose("realization", dim_name, "y", "x", ...)
+
+    # remove attrs that clash with encoding
+    for v in ds.data_vars:
+        ds[v].attrs.pop("_FillValue", None)
+        ds[v].attrs.pop("missing_value", None)
+
+    # encodings
+    for v in ds.data_vars:
+        enc = dict(zlib=True, complevel=int(complevel), dtype=dtype)
+        nd = (ds[v].rio.nodata if nodata is None else nodata)
+        if (nd is not None) and (not use_nan_fill):
+            enc["_FillValue"] = float(nd)
+        ds[v].encoding = enc
+
+    ds.attrs.update(Conventions="CF-1.8", source="Aggregated LISFLOOD ASCII outputs (cell-centred, wd-sized)")
+    ds.to_netcdf(out_nc)
     return out_nc
-
+########################################################################################

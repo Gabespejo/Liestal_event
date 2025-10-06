@@ -2,10 +2,10 @@
 import os, sys, argparse
 
 # ─── make sure your src/ folder is on PYTHONPATH ───────────────────────────────
-SRC = "/storage/homefs/ge24z347/LISFLOOD_FP_8_1/src"
+SRC = "/storage/homefs/ge24z347/Liestal_event/src"
 sys.path.insert(0, SRC)
 
-from lisflood_inputdata import crop_icon_to_dem
+from lisflood_inputdata import crop_icon_cosmo_to_dem
 
 parser = argparse.ArgumentParser(
     description="Crop ICON forecast onto your DEM grid and write per-realization NetCDFs"
@@ -20,13 +20,15 @@ parser.add_argument("--target-time-str",  default="2024-06-25T00:00:00",
                     help="forecast_reference_time (ISO string)")
 parser.add_argument("--max-lead-hours",   type=int, default=5,
                     help="maximum lead time to keep (in hours)")
+parser.add_argument("--prefix", default=None, help="Output filename prefix (e.g., Zell_2m)")
 args = parser.parse_args()
 
-crop_icon_to_dem(
+crop_icon_cosmo_to_dem(
     orig_nc         = args.orig_nc,
     dem_file        = args.dem_file,
     output_folder   = args.output_folder,
     target_time_str = args.target_time_str,
-    max_lead_hours  = args.max_lead_hours
+    max_lead_hours  = args.max_lead_hours,
+    prefix=args.prefix
 )
 

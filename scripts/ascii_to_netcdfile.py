@@ -1,83 +1,86 @@
 #!/usr/bin/env -S mamba run -n env_py311 python
-# Run from terminal; imports function from src/flow_depth_plotting.py
+# Convert LISFLOOD ASCII grids (*.wd plus optional *Vx/*Vy/*Qx/*Qy) to NetCDF.
+# - Default: stack only water_depth
+# - With --compute-derived: also center/derive vel/discharge fields
+# Uses src/flow_depth_plotting.py: ascii_single_member_to_netcdf
 
-import sys, os, argparse
+import sys
+import os
+import argparse
+import xarray as xr  # only used for optional post-write check/transpose
 
+# Make src importable
 THIS_DIR = os.path.dirname(__file__)
 SRC_DIR = os.path.abspath(os.path.join(THIS_DIR, "..", "src"))
 sys.path.insert(0, SRC_DIR)
 
-from flow_depth_plotting import ascii_stack_to_netcdf  # noqa: E402
+# *** Import ONLY what exists in your module ***
+from flow_depth_plotting import ascii_single_member_to_netcdf  # noqa: E402
 
 
 def main():
     p = argparse.ArgumentParser(
-        description="Convert ESRI ASCII grids (*.wd/*.asc) to NetCDF via flow_depth_plotting.ascii_stack_to_netcdf"
+        description=("Convert LISFLOOD ASCII grids to NetCDF. "
+                     "Use --compute-derived to also build velocity/discharge fields.")
     )
 
-    # EITHER: pattern mode
-    p.add_argument("--pattern", help="Glob or file, e.g. 'Zell_2m-*.wd' or 'Zell_2m-0004.wd'")
-
-    # OR: base+range mode (saves in the same directory by default)
-    p.add_argument("--dir", help="Directory containing the .wd files")
-    p.add_argument("--base", help="Base name (prefix before the dash), e.g. 'Zell_2m_bach'")
-    p.add_argument("--start", type=int, help="Start index, e.g. 0 for 0000")
-    p.add_argument("--end", type=int, help="End index (inclusive), e.g. 12 for 0012")
+    # Base+range mode (recommended) – pattern mode is not supported in this simple wrapper
+    p.add_argument("--dir", required=True, help="Directory containing the ASCII files")
+    p.add_argument("--base", required=True, help="Base name (prefix before the dash), e.g. 'Zell_2m'")
+    p.add_argument("--start", type=int, required=True, help="Start index, e.g. 0 for 0000")
+    p.add_argument("--end", type=int, required=True, help="End index (inclusive), e.g. 12 for 0012")
     p.add_argument("--width", type=int, default=4, help="Zero-pad width for indices (default: 4)")
 
-    # Common options
-    p.add_argument("--out", default=None,
-                   help="Output NetCDF path. If omitted in base+range mode, defaults to '<dir>/<base>_wd_<start..end>.nc'")
+    # Output & I/O
+    p.add_argument("--out", required=True, help="Output NetCDF path")
+    p.add_argument("--force", action="store_true", help="Overwrite output if it exists")
+    p.add_argument("--chunks", default=None, help="Dask chunks as 'X,Y' -> {'x':X,'y':Y} (e.g. 2000,2000)")
+
+    # Data options
     p.add_argument("--crs", default="EPSG:2056", help="CRS to write (default: EPSG:2056)")
-    p.add_argument("--var", default="water_depth", help="Variable name (default: water_depth)")
+    p.add_argument("--var", default="water_depth", help="Variable name for wd (default: water_depth)")
     p.add_argument("--nodata", type=float, default=None, help="Override nodata; default uses file header")
     p.add_argument("--dtype", default="float32", help="Output dtype (default: float32)")
     p.add_argument("--complevel", type=int, default=4, help="zlib compression level 0–9 (default: 4)")
-    p.add_argument("--regex", default=r"-(\d{4})\.(?:wd|asc)$",
-                   help=r"Regex to extract step index (default captures 4-digit index like '-0012.wd')")
-    p.add_argument("--chunks", default=None,
-                   help="Dask chunks as 'X,Y' -> {'x':X,'y':Y}. Example: 2000,2000")
-    p.add_argument("--nan-fill", action="store_true", help="Store NaNs instead of a fixed _FillValue")
-    p.add_argument("--no-strict-align", action="store_true", help="Disable strict geotransform/shape checks")
-    p.add_argument("--skip-missing", action="store_true",
-                   help="Skip missing files in base+range mode (default: error if any missing)")
+    p.add_argument("--regex", default=r"-(\d{4})\.(?:\w+)$",
+                   help=r"Regex to extract index (default captures 4-digit index like '-0012.*')")
+
+    # Time dim
+    p.add_argument("--dim-name", default="lead_time",
+                   help="Name of stacked time-like dimension (default: lead_time)")
+    p.add_argument("--time-units", default="hour",
+                   help="Units attribute for that coordinate (default: hour)")
+
+    # Derived fields
+    p.add_argument("--compute-derived", action="store_true",
+                   help="Also read Vx/Vy/Qx/Qy, center them to cell grid, and compute derived fields.")
+    p.add_argument("--wet-threshold", type=float, default=0.0,
+                   help="Mask derived fields where wd < threshold (default: 0.0)")
+    p.add_argument("--realization", type=int, default=None,
+                   help="If set, include a 'realization' dim with this integer value.")
+
+    # Extensions (change if your filenames differ)
+    p.add_argument("--ext-wd", default="wd", help="Extension for water depth files (default: wd)")
+    p.add_argument("--ext-vx", default="Vx", help="Extension for velocity x-face files (default: Vx)")
+    p.add_argument("--ext-vy", default="Vy", help="Extension for velocity y-face files (default: Vy)")
+    p.add_argument("--ext-qx", default="Qx", help="Extension for discharge x-face files (default: Qx)")
+    p.add_argument("--ext-qy", default="Qy", help="Extension for discharge y-face files (default: Qy)")
+
+    # Optional: store arrays as (DIM,x,y)/(x,y) instead of (DIM,y,x)/(y,x)
+    p.add_argument("--order-xy", action="store_true",
+                   help="Force variable dims to (DIM,x,y) (or (x,y) if single slice)")
 
     args = p.parse_args()
 
-    # Build inputs
-    if args.pattern:
-        inputs = args.pattern
-        if args.out is None:
-            p.error("--out is required when using --pattern")
-        out_path = args.out
-    else:
-        # Base+range mode
-        if not (args.dir and args.base and args.start is not None and args.end is not None):
-            p.error("Provide either --pattern OR (--dir --base --start --end)")
-        if args.start > args.end:
-            p.error("--start must be <= --end")
-
-        # Build explicit list of files with zero-padding
-        inputs = []
-        missing = []
-        for i in range(args.start, args.end + 1):
-            fname = f"{args.base}-{i:0{args.width}d}.wd"
-            fpath = os.path.join(args.dir, fname)
-            if os.path.exists(fpath):
-                inputs.append(fpath)
-            else:
-                missing.append(fpath)
-
-        if missing and not args.skip_missing:
-            p.error("Missing files:\n  " + "\n  ".join(missing))
-        if not inputs:
-            p.error("No existing files found for the requested range.")
-
-        # Default output path in the same directory if not provided
-        out_path = args.out or os.path.join(
-            args.dir,
-            f"{args.base}_wd_{args.start:0{args.width}d}-{args.end:0{args.width}d}.nc"
-        )
+    # Prepare var_map: always include wd; add others only if --compute-derived
+    var_map = {"water_depth": args.ext_wd}
+    if args.compute_derived:
+        var_map.update({
+            "vel_x": args.ext_vx,
+            "vel_y": args.ext_vy,
+            "flux_x": args.ext_qx,
+            "flux_y": args.ext_qy,
+        })
 
     # Chunks
     chunks = None
@@ -88,21 +91,72 @@ def main():
         except Exception:
             p.error("Invalid --chunks. Use 'X,Y' like 2000,2000")
 
-    out = ascii_stack_to_netcdf(
-        inputs=inputs,
-        out_nc=out_path,
+    # Overwrite if requested
+    if args.force and os.path.exists(args.out):
+        try:
+            os.remove(args.out)
+        except Exception as e:
+            p.error(f"Could not remove existing output '{args.out}': {e}")
+
+    # Call the single-member writer (works for wd-only or derived)
+    out = ascii_single_member_to_netcdf(
+        out_nc=args.out,
+        folder=args.dir,
+        base=args.base,
+        start=args.start,
+        end=args.end,
+        width=args.width,
+        var_map=var_map,
         crs=args.crs,
-        var_name=args.var,
         nodata=args.nodata,
         dtype=args.dtype,
         complevel=args.complevel,
-        step_regex=args.regex,
         chunks=chunks,
-        use_nan_fill=args.nan_fill,
-        strict_align=not args.no_strict_align,
+        step_regex=args.regex,
+        strict_align=True,
+        use_nan_fill=False,
+        wet_threshold=args.wet_threshold,
+        skip_missing=False,
+        dim_name=args.dim_name,
+        time_units=args.time_units,
+        realization=args.realization,
     )
     print(f"Saved: {out}")
+
+    # Optional: guarantee (dim,x,y)/(x,y) ordering for the primary wd variable
+    if args.order_xy:
+        ds = xr.open_dataset(args.out)
+        var = args.var if args.var in ds else "water_depth"
+        if var not in ds:
+            ds.close()
+            raise KeyError(f"Variable '{var}' not found in {args.out}")
+
+        dim = args.dim_name
+        needs_write = False
+
+        if dim in ds[var].dims and ds[var].ndim == 3:
+            if tuple(ds[var].dims) != (dim, "x", "y"):
+                ds[var] = ds[var].transpose(dim, "x", "y")
+                needs_write = True
+        else:
+            if tuple(ds[var].dims) != ("x", "y"):
+                ds[var] = ds[var].transpose("x", "y")
+                needs_write = True
+
+        if needs_write:
+            tmp_path = args.out + ".tmp"
+            ds.to_netcdf(tmp_path, mode="w")
+            ds.close()
+            os.replace(tmp_path, args.out)
+            print(f"Rewritten with (x,y) as last dims: {args.out}")
+        else:
+            ds.close()
+            print("No reorder needed; dims already in desired order.")
 
 
 if __name__ == "__main__":
     main()
+
+    
+    
+    

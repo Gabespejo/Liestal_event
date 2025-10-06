@@ -256,6 +256,150 @@ def crop_icon_to_dem(
 
         nc.close()
         print(f"✔ Saved: {out_fn}")
+        
+        
+#################################################################################################
+######################## COSMO AND ICON BOTH ##################################################
+
+import os
+import numpy as np
+import xarray as xr
+import rioxarray as rxr
+from netCDF4 import Dataset
+from datetime import date
+
+def _to_hours(arr):
+    """Return arr as float32 hours, handling timedelta, datetime, or numeric+units."""
+    if np.issubdtype(arr.dtype, np.timedelta64):
+        return (arr / np.timedelta64(1, "h")).astype("float32")
+    if np.issubdtype(arr.dtype, np.datetime64):
+        t0 = arr.values[0]
+        return ((arr.values - t0) / np.timedelta64(1, "h")).astype("float32")
+    units = (getattr(arr, "attrs", {}) or {}).get("units", "").lower()
+    vals = np.asarray(arr.values, dtype="float64")
+    if "hour" in units or units == "h":
+        return vals.astype("float32")
+    if "second" in units or units == "s":
+        return (vals / 3600.0).astype("float32")
+    if "minute" in units or units in ("min", "m"):
+        return (vals / 60.0).astype("float32")
+    if np.nanmax(vals) > 1000:              # heuristic: likely seconds
+        return (vals / 3600.0).astype("float32")
+    return vals.astype("float32")            # assume already hours
+
+def crop_icon_cosmo_to_dem(
+    orig_nc: str,
+    dem_file: str,
+    output_folder: str,
+    target_time_str: str = "2024-06-25T00:00:00",
+    max_lead_hours: int = 5,
+    prefix: str | None = None,
+):
+    """
+    Crop ICON/COSMO precipitation to the DEM bbox (no resampling) and write one
+    NetCDF per realization. Dtypes:
+      time: float32 hours, x/y: float64 meters, rainfall_depth: float32 mm.
+    """
+
+    os.makedirs(output_folder, exist_ok=True)
+
+    # 1) DEM & bounds
+    if dem_file.lower().endswith((".dem", ".asc")):
+        dem = rxr.open_rasterio(dem_file, masked=True, driver="AAIGrid").sel(band=1)
+    else:
+        dem = rxr.open_rasterio(dem_file, masked=True).sel(band=1)
+    if dem.rio.crs is None:
+        dem = dem.rio.write_crs("EPSG:2056")
+    left, bottom, right, top = dem.rio.bounds()
+    if prefix is None:
+        prefix = os.path.splitext(os.path.basename(dem_file))[0]
+    print(f"DEM bounds ▶ X {left:.0f}→{right:.0f}, Y {bottom:.0f}→{top:.0f}")
+
+    # 2) Open forecast robustly
+    try:
+        ds = xr.open_dataset(orig_nc)
+    except Exception:
+        ds = xr.open_dataset(orig_nc, decode_timedelta=False)
+
+    # 3) Select init time if present
+    if "forecast_reference_time" in ds.coords:
+        ds = ds.sel(forecast_reference_time=np.datetime64(target_time_str), method="nearest")
+
+    # 4) Normalize time → hours(float32) and clip
+    if "lead_time" in ds.coords:
+        ds = ds.drop_vars("time", errors="ignore")
+        hours_all = _to_hours(ds["lead_time"])
+        keep = xr.DataArray(hours_all, coords={"lead_time": ds["lead_time"]}, dims=("lead_time",)) \
+               <= float(max_lead_hours)
+        ds = ds.sel(lead_time=keep)
+        hours_kept = _to_hours(ds["lead_time"]).astype("float32")
+        ds = ds.assign_coords(time=("lead_time", hours_kept)).swap_dims({"lead_time": "time"})
+    else:
+        if "time" not in ds.coords:
+            raise ValueError("Dataset has neither 'lead_time' nor 'time'.")
+        hours = _to_hours(ds["time"])
+        keep = xr.DataArray(hours, coords={"time": ds["time"]}, dims=("time",)) <= float(max_lead_hours)
+        ds = ds.sel(time=keep)
+        ds = ds.assign_coords(time=("time", _to_hours(ds["time"]).astype("float32")))
+
+    # 5) Spatial crop (no interpolation), handle axis order
+    if "x" not in ds.coords or "y" not in ds.coords:
+        raise ValueError("Dataset must have 'x' and 'y' coordinates.")
+    x, y = ds["x"].values, ds["y"].values
+    xs = slice(min(left, right), max(left, right)) if x[0] < x[-1] else slice(max(left, right), min(left, right))
+    ys = slice(min(bottom, top), max(bottom, top)) if y[0] < y[-1] else slice(max(bottom, top), min(bottom, top))
+    ds = ds.sel(x=xs, y=ys)
+    print("Spatial crop done (no interpolation).")
+
+    # 6) Variable (assumes 'precipitation_amount'); ensure 'time' dim
+    var = ds["precipitation_amount"]
+    if "lead_time" in var.dims:
+        var = var.rename({"lead_time": "time"})
+
+    # 7) Write one file per realization with enforced dtypes
+    reals = ds["realization"].values if "realization" in ds.coords else [None]
+    for idx, r in enumerate(reals, start=1):
+        sub = var if r is None else var.sel(realization=r)
+        da = sub.transpose("time", "y", "x").drop_vars(
+            ["forecast_reference_time", "realization"], errors="ignore"
+        )
+
+        # ENFORCE DTYPES: time f32, x/y f64, data f32
+        data  = np.nan_to_num(da.values, nan=0.0).astype("float32")
+        tvals = da.coords["time"].values.astype("float32")
+        xvals = da.coords["x"].values.astype("float64")
+        yvals = da.coords["y"].values.astype("float64")
+
+        out_fn = os.path.join(output_folder, f"{prefix}_{idx}.nc")
+        with Dataset(out_fn, "w") as nc:
+            nt, ny, nx = data.shape
+            nc.createDimension("time", nt)
+            nc.createDimension("x", nx)
+            nc.createDimension("y", ny)
+
+            tv = nc.createVariable("time", "f4", ("time",))
+            tv.units = "hour"; tv.axis = "T"; tv[:] = tvals
+
+            xv = nc.createVariable("x", "f8", ("x",))
+            xv.units = "m"; xv.axis = "X"; xv[:] = xvals
+
+            yv = nc.createVariable("y", "f8", ("y",))
+            yv.units = "m"; yv.axis = "Y"; yv[:] = yvals
+
+            rv = nc.createVariable("rainfall_depth", "f4", ("time", "y", "x"),
+                                   zlib=True, complevel=4, shuffle=True)
+            rv.units = "mm"
+            rv.standard_name = "precipitation_amount"
+            rv[:] = data
+
+            nc.description = "Cropped ICON rainfall, realization {}".format(idx) if r is not None \
+                             else "Cropped ICON rainfall (single realization)"
+            nc.history = f"Created on {date.today().isoformat()}"
+            nc.source = "ICON forecast cropped to DEM box (no resampling)"
+
+        print(f"✔ Saved: {out_fn}")
+
+
 ################################################################################################
 ################################################################################################
 ################# CROP THE COMBIPRECIP #######################################################
@@ -1094,30 +1238,32 @@ def write_bci_qflex(
 def write_bci_qvar(
     output_path,
     inflows=None,             # dict: {"QPF": [(x,y),...], "QPE": [(x,y),...]}
-    outflow_side="E",         # FREE outflow is always written
+    outflow_side="E",         # FREE outflow (side) is always written
     outflow_start=None,
     outflow_end=None,
-    outflow_slope=None
+    outflow_slope=None,
+    outflow_points_free=None  # NEW: list of (x,y) for point FREE outflows
 ):
     """
-    Write a .bci file with QVAR inflows and one FREE outflow.
+    Write a .bci file with QVAR inflows, one FREE side outflow, and optional FREE point outflows.
 
     inflows: dict mapping inflow_name -> list of (x,y) points
              e.g. {"QPF":[(2704418.096,1256357.968), (2704420.096,1256357.968)],
                    "QPE":[(...), (...)]}
+    outflow_points_free: list of (x,y) to emit as 'P x y FREE'
     """
     if outflow_start is None or outflow_end is None:
         raise ValueError("outflow_start and outflow_end are required.")
 
     lines = []
 
-    # --- emit QVAR point inflows
+    # --- QVAR point inflows
     if inflows:
         for inflow_name, points in inflows.items():
             for (x, y) in points:
                 lines.append(f"P {float(x):.3f} {float(y):.3f} QVAR {inflow_name}")
 
-    # --- FREE outflow
+    # --- FREE side outflow
     if outflow_slope is None:
         lines.append(f"{outflow_side} {float(outflow_start):.3f} {float(outflow_end):.3f} FREE")
     else:
@@ -1125,12 +1271,19 @@ def write_bci_qvar(
             f"{outflow_side} {float(outflow_start):.3f} {float(outflow_end):.3f} FREE {float(outflow_slope):.6f}"
         )
 
+    # --- FREE point outflows
+    if outflow_points_free:
+        for (x, y) in outflow_points_free:
+            lines.append(f"P {float(x):.3f} {float(y):.3f} FREE")
+
     # --- write
     with open(output_path, "w") as f:
-        for L in lines:
-            f.write(L + "\n")
+        f.writelines(L + "\n" for L in lines)
 
     print(f"✔ .bci written → {output_path}")
+    
+################################################################################
+#################################################################################
 
 #################################################################################
 ########### bdy file ##########################################################

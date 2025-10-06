@@ -1,14 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=test_env
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --mem=1G
-#SBATCH --gres=gpu:h100:1
+#SBATCH --gres=gpu:rtx4090:1
 #SBATCH --partition=gpu
-#SBATCH --qos=job_gpu
-#SBATCH --time=04:00:00
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --job_gpu                           #qos=job_gpu_preemptable
+#SBATCH --time=15:00:00
+#SBATCH --output=/storage/homefs/ge24z347/LISFLOOD_FP_8_1/scripts/logs/%x_%j.out
+#SBATCH --error=/storage/homefs/ge24z347/LISFLOOD_FP_8_1/scripts/logs/%x_%j.err
 
 # 1) Start clean
 echo "📦 Purging environment modules..."

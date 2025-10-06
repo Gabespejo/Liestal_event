@@ -2,7 +2,7 @@
 #SBATCH --gres=gpu:rtx4090:1
 #SBATCH --partition=gpu
 #SBATCH --qos=job_gpu_preemptable
-#SBATCH --time=05:00:00
+#SBATCH --time=15:00:00
 #SBATCH --output=/storage/homefs/ge24z347/LISFLOOD_FP_8_1/scripts/logs/%x_%j.out
 #SBATCH --error=/storage/homefs/ge24z347/LISFLOOD_FP_8_1/scripts/logs/%x_%j.err
 
