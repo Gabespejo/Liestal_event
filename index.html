@@ -4,97 +4,100 @@
   <meta charset="UTF-8">
   <title>COSMO Ensembles + Combiprecip (4×3)</title>
   <style>
-    :root { --panel-w: 360px; }
-    body {
-      font-family: Arial, sans-serif;
-      background-color: #f7f7f7;
-      margin: 0;
-      padding: 0;
+    /* Smaller tiles; bigger colorbar */
+    :root {
+      --panel-w: 300px;    /* was 360px */
+      --gap: 14px;         /* a touch tighter */
     }
-    .slider-container {
-      text-align: center;
-      padding: 10px;
-      background-color: #eeeeee;
-      position: sticky;
-      top: 0;
-      z-index: 10;
+    body { font-family: Arial, sans-serif; background:#f7f7f7; margin:0; padding:0; }
+    .slider-container { text-align:center; padding:10px; background:#eee; position:sticky; top:0; z-index:10; }
+    input[type=range]{ width:40%; height:25px; }
+    .wrapper{ display:flex; flex-direction:row; height:calc(100vh - 60px); }
+    .grid{ flex-grow:1; overflow-y:auto; padding:12px; }
+    .grid-inner{
+      display:grid;
+      grid-template-columns: repeat(4, var(--panel-w)); /* 4 per row */
+      gap: var(--gap);
+      justify-content:center;
     }
-    input[type=range] { width: 40%; height: 25px; }
-    .wrapper { display: flex; flex-direction: row; height: calc(100vh - 60px); }
-    .grid {
-      flex-grow: 1; overflow-y: auto; padding: 16px;
+    .panel{
+      width:var(--panel-w);
+      background:#fff; padding:10px;
+      border-radius:10px; box-shadow:0 2px 8px rgba(0,0,0,.08);
     }
-    .grid-inner {
-      display: grid;
-      grid-template-columns: repeat(4, var(--panel-w));
-      gap: 18px;
-      justify-content: center;
+    .panel h4{ font-size:13px; margin:4px 0 8px 0; }
+    .panel img{
+      display:block; width:100%; height:auto;
+      border:1px solid #ccc; border-radius:6px; background:#fff;
     }
-    .panel {
-      width: var(--panel-w);
-      background: #fff;
-      padding: 12px;
-      border-radius: 10px;
-      box-shadow: 0 2px 8px rgba(0,0,0,.08);
+
+    /* Bigger colorbar */
+    .side-panel{
+      width: 180px;                  /* was 120px */
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      background:#eee; padding:10px;
     }
-    .panel img {
-      max-width: 100%; height: auto;
-      border: 1px solid #ccc; border-radius: 6px;
-      background: #fff;
+    .side-panel img{
+      width: 140px;                  /* was 80px */
+      max-width: 100%;
     }
-    .panel h4 { font-size: 14px; margin: 5px 0 8px 0; }
-    .side-panel {
-      width: 120px; display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      background-color: #eeeeee; padding: 10px;
+
+    .hint{ color:#555; font-size:12px; margin-top:6px; }
+
+    /* Responsive: on narrower screens drop to 3 or 2 columns */
+    @media (max-width: 1400px){
+      .grid-inner{ grid-template-columns: repeat(3, var(--panel-w)); }
     }
-    .side-panel img { width: 80px; margin-top: 10px; }
-    .hint { color:#555; font-size:12px; margin-top:6px; }
+    @media (max-width: 1050px){
+      .grid-inner{ grid-template-columns: repeat(2, var(--panel-w)); }
+    }
   </style>
 </head>
 <body>
 
 <div class="slider-container">
   <div><strong>Lead Time (ensembles):</strong>
+    <!-- 0..8 => lead_time0..8 for ensembles -->
     <input type="range" min="0" max="8" value="0" id="leadSlider">
   </div>
-  <div class="hint">Ensembles show <code>lead_time1..9</code>. Combiprecip shows <code>lead_time4..12</code> (offset +3).</div>
+  <div class="hint">Ensembles show <code>lead_time0..8</code>. Combiprecip shows <code>lead_time4..12</code> (offset +4).</div>
 </div>
 
 <div class="wrapper">
   <div class="grid">
     <div class="grid-inner">
-      <!-- 11 ensemble tiles -->
-      <div class="panel"><h4>Ensemble 1</h4><img id="img_r1"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r1_lead_time1_zoom.png"  alt="Ensemble 1"></div>
-      <div class="panel"><h4>Ensemble 2</h4><img id="img_r2"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r2_lead_time1_zoom.png"  alt="Ensemble 2"></div>
-      <div class="panel"><h4>Ensemble 3</h4><img id="img_r3"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r3_lead_time1_zoom.png"  alt="Ensemble 3"></div>
-      <div class="panel"><h4>Ensemble 4</h4><img id="img_r4"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r4_lead_time1_zoom.png"  alt="Ensemble 4"></div>
+      <!-- 11 ensemble tiles (start at lead_time0) -->
+      <div class="panel"><h4>Ensemble 1</h4><img id="img_r1"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r1_lead_time0_zoom.png"  alt="Ensemble 1" loading="lazy" decoding="async"></div>
+      <div class="panel"><h4>Ensemble 2</h4><img id="img_r2"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r2_lead_time0_zoom.png"  alt="Ensemble 2" loading="lazy" decoding="async"></div>
+      <div class="panel"><h4>Ensemble 3</h4><img id="img_r3"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r3_lead_time0_zoom.png"  alt="Ensemble 3" loading="lazy" decoding="async"></div>
+      <div class="panel"><h4>Ensemble 4</h4><img id="img_r4"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r4_lead_time0_zoom.png"  alt="Ensemble 4" loading="lazy" decoding="async"></div>
 
-      <div class="panel"><h4>Ensemble 5</h4><img id="img_r5"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r5_lead_time1_zoom.png"  alt="Ensemble 5"></div>
-      <div class="panel"><h4>Ensemble 6</h4><img id="img_r6"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r6_lead_time1_zoom.png"  alt="Ensemble 6"></div>
-      <div class="panel"><h4>Ensemble 7</h4><img id="img_r7"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r7_lead_time1_zoom.png"  alt="Ensemble 7"></div>
-      <div class="panel"><h4>Ensemble 8</h4><img id="img_r8"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r8_lead_time1_zoom.png"  alt="Ensemble 8"></div>
+      <div class="panel"><h4>Ensemble 5</h4><img id="img_r5"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r5_lead_time0_zoom.png"  alt="Ensemble 5" loading="lazy" decoding="async"></div>
+      <div class="panel"><h4>Ensemble 6</h4><img id="img_r6"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r6_lead_time0_zoom.png"  alt="Ensemble 6" loading="lazy" decoding="async"></div>
+      <div class="panel"><h4>Ensemble 7</h4><img id="img_r7"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r7_lead_time0_zoom.png"  alt="Ensemble 7" loading="lazy" decoding="async"></div>
+      <div class="panel"><h4>Ensemble 8</h4><img id="img_r8"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r8_lead_time0_zoom.png"  alt="Ensemble 8" loading="lazy" decoding="async"></div>
 
-      <div class="panel"><h4>Ensemble 9</h4><img id="img_r9"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r9_lead_time1_zoom.png"  alt="Ensemble 9"></div>
-      <div class="panel"><h4>Ensemble 10</h4><img id="img_r10" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r10_lead_time1_zoom.png" alt="Ensemble 10"></div>
-      <div class="panel"><h4>Ensemble 11</h4><img id="img_r11" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r11_lead_time1_zoom.png" alt="Ensemble 11"></div>
+      <div class="panel"><h4>Ensemble 9</h4><img id="img_r9"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r9_lead_time0_zoom.png"  alt="Ensemble 9" loading="lazy" decoding="async"></div>
+      <div class="panel"><h4>Ensemble 10</h4><img id="img_r10" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r10_lead_time0_zoom.png" alt="Ensemble 10" loading="lazy" decoding="async"></div>
+      <div class="panel"><h4>Ensemble 11</h4><img id="img_r11" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r11_lead_time0_zoom.png" alt="Ensemble 11" loading="lazy" decoding="async"></div>
 
-      <!-- 12th tile: Combiprecip -->
+      <!-- 12th: Combiprecip (start at lead_time4) -->
       <div class="panel"><h4>Combiprecip</h4>
-        <img id="img_combi" src="ZELL_PLOTS/Zell_2m_Combiprecip/wd_det_lead_time4_zoom.png" alt="Combiprecip">
+        <img id="img_combi" src="ZELL_PLOTS/Zell_2m_Combiprecip/wd_det_lead_time4_zoom.png" alt="Combiprecip" loading="lazy" decoding="async">
       </div>
     </div>
   </div>
 
   <div class="side-panel">
+    <!-- bigger colorbar image -->
     <img src="water_depth_cbar_vertical.png" alt="Colorbar">
   </div>
 </div>
 
 <script>
-  // Slider index 0..8 -> ensembles lead_time 1..9
-  const leadEns = [1,2,3,4,5,6,7,8,9];
-  const offsetCombi = 3; // combi = L + 3 -> 4..12
+  // 0..8 -> lead_time0..8 (COSMO). Combiprecip uses L+4 -> 4..12
+  const leadEns = [0,1,2,3,4,5,6,7,8];
+  const offsetCombi = 4;
 
   const cosmoDir = "ZELL_PLOTS/Zell_2m_COSMO";
   const combiDir = "ZELL_PLOTS/Zell_2m_Combiprecip";
@@ -107,29 +110,23 @@
     const L  = leadEns[idx];
     const Lc = L + offsetCombi;
 
-    // Update ensembles
     for (let i=0;i<ensembleIds.length;i++){
       const img = document.getElementById(ensembleIds[i]);
       const r = rNums[i];
       img.src = `${cosmoDir}/wd_r${r}_lead_time${L}_zoom.png`;
     }
-    // Update combiprecip
-    document.getElementById("img_combi").src =
-      `${combiDir}/wd_det_lead_time${Lc}_zoom.png`;
-
+    document.getElementById("img_combi").src = `${combiDir}/wd_det_lead_time${Lc}_zoom.png`;
     document.getElementById("leadSlider").value = idx;
   }
 
   const slider = document.getElementById("leadSlider");
   slider.addEventListener("input", e => setImages(e.target.value));
 
-  // optional keyboard
   window.addEventListener("keydown", e => {
     if (e.key === "ArrowRight") setImages(Number(slider.value)+1);
     if (e.key === "ArrowLeft")  setImages(Number(slider.value)-1);
   });
 
-  // init
   setImages(0);
 </script>
 </body>
