@@ -1,11 +1,6 @@
-#!/usr/bin/env -S mamba run -n env_py311 python
-# Convert LISFLOOD ASCII grids (*.wd plus optional *Vx/*Vy/*Qx/*Qy) to NetCDF.
-# - Default: stack only water_depth
-# - With --compute-derived: also center/derive vel/discharge fields
-# Uses src/flow_depth_plotting.py: ascii_single_member_to_netcdf
-
-import sys
+#!/usr/bin/env python3
 import os
+import sys
 import argparse
 import xarray as xr  # only used for optional post-write check/transpose
 
@@ -14,17 +9,19 @@ THIS_DIR = os.path.dirname(__file__)
 SRC_DIR = os.path.abspath(os.path.join(THIS_DIR, "..", "src"))
 sys.path.insert(0, SRC_DIR)
 
-# *** Import ONLY what exists in your module ***
+# Import your function from your module
 from flow_depth_plotting import ascii_single_member_to_netcdf  # noqa: E402
 
 
 def main():
     p = argparse.ArgumentParser(
-        description=("Convert LISFLOOD ASCII grids to NetCDF. "
-                     "Use --compute-derived to also build velocity/discharge fields.")
+        description=(
+            "Convert LISFLOOD ASCII grids to NetCDF. "
+            "Optionally compute derived velocity/discharge fields."
+        )
     )
 
-    # Base+range mode (recommended) – pattern mode is not supported in this simple wrapper
+    # Base+range
     p.add_argument("--dir", required=True, help="Directory containing the ASCII files")
     p.add_argument("--base", required=True, help="Base name (prefix before the dash), e.g. 'Zell_2m'")
     p.add_argument("--start", type=int, required=True, help="Start index, e.g. 0 for 0000")
@@ -42,22 +39,48 @@ def main():
     p.add_argument("--nodata", type=float, default=None, help="Override nodata; default uses file header")
     p.add_argument("--dtype", default="float32", help="Output dtype (default: float32)")
     p.add_argument("--complevel", type=int, default=4, help="zlib compression level 0–9 (default: 4)")
-    p.add_argument("--regex", default=r"-(\d{4})\.(?:\w+)$",
-                   help=r"Regex to extract index (default captures 4-digit index like '-0012.*')")
+    p.add_argument(
+        "--regex",
+        default=r"-(\d{4})\.(?:\w+)$",
+        help=r"Regex to extract index (default captures 4-digit index like '-0012.*')",
+    )
 
-    # Time dim
-    p.add_argument("--dim-name", default="lead_time",
-                   help="Name of stacked time-like dimension (default: lead_time)")
-    p.add_argument("--time-units", default="hour",
-                   help="Units attribute for that coordinate (default: hour)")
+    # Time dimension + timestamps (NEW)
+    p.add_argument(
+        "--dim-name",
+        default="REFERENCE_TS",
+        help="Name of stacked time dimension in NetCDF (default: REFERENCE_TS)",
+    )
+    p.add_argument(
+        "--reference-start",
+        required=True,
+        help="Timestamp for the FIRST READ FILE (index=start). Example: 2022-05-05T12:00:00.000000000",
+    )
+    p.add_argument(
+        "--dt-minutes",
+        type=int,
+        default=60,
+        help="Minutes between timesteps (default: 60 for hourly)",
+    )
 
     # Derived fields
-    p.add_argument("--compute-derived", action="store_true",
-                   help="Also read Vx/Vy/Qx/Qy, center them to cell grid, and compute derived fields.")
-    p.add_argument("--wet-threshold", type=float, default=0.0,
-                   help="Mask derived fields where wd < threshold (default: 0.0)")
-    p.add_argument("--realization", type=int, default=None,
-                   help="If set, include a 'realization' dim with this integer value.")
+    p.add_argument(
+        "--compute-derived",
+        action="store_true",
+        help="Also read Vx/Vy/Qx/Qy, center them to cell grid, and compute derived fields.",
+    )
+    p.add_argument(
+        "--wet-threshold",
+        type=float,
+        default=0.0,
+        help="Mask derived fields where wd < threshold (default: 0.0)",
+    )
+    p.add_argument(
+        "--realization",
+        type=int,
+        default=None,
+        help="If set, include a 'realization' dim with this integer value.",
+    )
 
     # Extensions (change if your filenames differ)
     p.add_argument("--ext-wd", default="wd", help="Extension for water depth files (default: wd)")
@@ -98,7 +121,7 @@ def main():
         except Exception as e:
             p.error(f"Could not remove existing output '{args.out}': {e}")
 
-    # Call the single-member writer (works for wd-only or derived)
+    # Call the writer
     out = ascii_single_member_to_netcdf(
         out_nc=args.out,
         folder=args.dir,
@@ -118,12 +141,13 @@ def main():
         wet_threshold=args.wet_threshold,
         skip_missing=False,
         dim_name=args.dim_name,
-        time_units=args.time_units,
+        reference_start=args.reference_start,
+        dt_minutes=args.dt_minutes,
         realization=args.realization,
     )
     print(f"Saved: {out}")
 
-    # Optional: guarantee (dim,x,y)/(x,y) ordering for the primary wd variable
+    # Optional reorder
     if args.order_xy:
         ds = xr.open_dataset(args.out)
         var = args.var if args.var in ds else "water_depth"
@@ -156,6 +180,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
     
     
