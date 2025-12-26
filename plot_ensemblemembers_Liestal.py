@@ -22,6 +22,9 @@ combi_times = [
     "2022-05-05T17-00-00",
     "2022-05-05T18-00-00",
     "2022-05-05T19-00-00",
+    "2022-05-05T20-00-00",
+    "2022-05-05T21-00-00",
+    "2022-05-05T22-00-00",
 ]
 
 # choose your ensemble filename pattern (pick the one you actually have)
