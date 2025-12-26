@@ -110,11 +110,12 @@
 
 <div class="slider-container">
   <div><strong>Lead Time (ensembles):</strong>
-    <!-- 0..8 -> COSMO lead_time 0..8 -->
-    <input type="range" min="0" max="8" value="0" id="leadSlider">
+    <!-- 0..10 -> COSMO lead_time 0..10 and Combiprecip 12:00..22:00 -->
+    <input type="range" min="0" max="10" value="0" id="leadSlider">
   </div>
   <div class="hint">
-    COSMO shows <code>lead_time0..8</code>. Combiprecip shows <code>lead_time4..12</code> (offset +4).
+    Slider updates COSMO <code>Forecast_r*_lead_time*</code> and Combiprecip
+    <code>2022-05-05T12:00..22:00</code>.
   </div>
 </div>
 
@@ -123,23 +124,24 @@
   <div class="grid">
     <div class="grid-inner">
       <!-- 11 COSMO panels -->
-      <div class="panel"><h4>Ensemble 1</h4><img id="img_r1"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r1_lead_time0_zoom.png?v=init"  alt="Ensemble 1" loading="lazy"></div>
-      <div class="panel"><h4>Ensemble 2</h4><img id="img_r2"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r2_lead_time0_zoom.png?v=init"  alt="Ensemble 2" loading="lazy"></div>
-      <div class="panel"><h4>Ensemble 3</h4><img id="img_r3"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r3_lead_time0_zoom.png?v=init"  alt="Ensemble 3" loading="lazy"></div>
-      <div class="panel"><h4>Ensemble 4</h4><img id="img_r4"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r4_lead_time0_zoom.png?v=init"  alt="Ensemble 4" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 1</h4><img id="img_r1"  src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r1_lead_time0_zoom.png?v=init"  alt="Ensemble 1" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 2</h4><img id="img_r2"  src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r2_lead_time0_zoom.png?v=init"  alt="Ensemble 2" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 3</h4><img id="img_r3"  src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r3_lead_time0_zoom.png?v=init"  alt="Ensemble 3" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 4</h4><img id="img_r4"  src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r4_lead_time0_zoom.png?v=init"  alt="Ensemble 4" loading="lazy"></div>
 
-      <div class="panel"><h4>Ensemble 5</h4><img id="img_r5"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r5_lead_time0_zoom.png?v=init"  alt="Ensemble 5" loading="lazy"></div>
-      <div class="panel"><h4>Ensemble 6</h4><img id="img_r6"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r6_lead_time0_zoom.png?v=init"  alt="Ensemble 6" loading="lazy"></div>
-      <div class="panel"><h4>Ensemble 7</h4><img id="img_r7"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r7_lead_time0_zoom.png?v=init"  alt="Ensemble 7" loading="lazy"></div>
-      <div class="panel"><h4>Ensemble 8</h4><img id="img_r8"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r8_lead_time0_zoom.png?v=init"  alt="Ensemble 8" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 5</h4><img id="img_r5"  src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r5_lead_time0_zoom.png?v=init"  alt="Ensemble 5" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 6</h4><img id="img_r6"  src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r6_lead_time0_zoom.png?v=init"  alt="Ensemble 6" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 7</h4><img id="img_r7"  src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r7_lead_time0_zoom.png?v=init"  alt="Ensemble 7" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 8</h4><img id="img_r8"  src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r8_lead_time0_zoom.png?v=init"  alt="Ensemble 8" loading="lazy"></div>
 
-      <div class="panel"><h4>Ensemble 9</h4><img id="img_r9"  src="ZELL_PLOTS/Zell_2m_COSMO/wd_r9_lead_time0_zoom.png?v=init"  alt="Ensemble 9" loading="lazy"></div>
-      <div class="panel"><h4>Ensemble 10</h4><img id="img_r10" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r10_lead_time0_zoom.png?v=init" alt="Ensemble 10" loading="lazy"></div>
-      <div class="panel"><h4>Ensemble 11</h4><img id="img_r11" src="ZELL_PLOTS/Zell_2m_COSMO/wd_r11_lead_time0_zoom.png?v=init" alt="Ensemble 11" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 9</h4><img id="img_r9"  src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r9_lead_time0_zoom.png?v=init"  alt="Ensemble 9" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 10</h4><img id="img_r10" src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r10_lead_time0_zoom.png?v=init" alt="Ensemble 10" loading="lazy"></div>
+      <div class="panel"><h4>Ensemble 11</h4><img id="img_r11" src="ZELL_PLOTS/Zell_2m_COSMO/Forecast_r11_lead_time0_zoom.png?v=init" alt="Ensemble 11" loading="lazy"></div>
 
       <!-- 12th: Combiprecip deterministic -->
       <div class="panel"><h4>Combiprecip</h4>
-        <img id="img_combi" src="ZELL_PLOTS/Zell_2m_Combiprecip/wd_det_lead_time4_zoom.png?v=init" alt="Combiprecip" loading="lazy">
+        <!-- initial src will be overridden by JS, but keep a valid one -->
+        <img id="img_combi" src="ZELL_PLOTS/Zell_2m_Combiprecip/Combiprecip_2022-05-05T12-00-00_zoom.png?v=init" alt="Combiprecip" loading="lazy">
       </div>
     </div>
   </div>
@@ -151,13 +153,26 @@
 </div>
 
 <script>
-  // í ½í´ bump this to invalidate browser caches after you push new PNGs
-  const BUILD_VER = "2025-10-06d";
+  // bump this to invalidate browser caches after you push new PNGs
+  const BUILD_VER = "2025-10-06e";
 
-  // Slider index 0..8 => COSMO lead_time 0..8
-  const leadEns = [0,1,2,3,4,5,6,7,8];
-  // Combiprecip should show lead_time 4..12 when slider is 0..8
-  const offsetCombi = 4;
+  // Slider index -> COSMO lead_time
+  const leadEns = [0,1,2,3,4,5,6,7,8,9,10];
+
+  // Combiprecip timestamps (must match length of leadEns)
+  const combiTimes = [
+    "2022-05-05T12-00-00",
+    "2022-05-05T13-00-00",
+    "2022-05-05T14-00-00",
+    "2022-05-05T15-00-00",
+    "2022-05-05T16-00-00",
+    "2022-05-05T17-00-00",
+    "2022-05-05T18-00-00",
+    "2022-05-05T19-00-00",
+    "2022-05-05T20-00-00",
+    "2022-05-05T21-00-00",
+    "2022-05-05T22-00-00"
+  ];
 
   const cosmoDir = "ZELL_PLOTS/Zell_2m_COSMO";
   const combiDir = "ZELL_PLOTS/Zell_2m_Combiprecip";
@@ -166,34 +181,45 @@
   const rNums       = [1,2,3,4,5,6,7,8,9,10,11];
 
   const slider = document.getElementById("leadSlider");
+  slider.min = "0";
   slider.max = String(leadEns.length - 1);
 
   function setImages(idx){
-    idx = Math.max(0, Math.min(leadEns.length-1, Number(idx)||0));
-    const L  = leadEns[idx];
-    const Lc = L + offsetCombi;
+    idx = Math.max(0, Math.min(leadEns.length - 1, Number(idx) || 0));
 
-    // Ensembles
-    for (let i=0;i<ensembleIds.length;i++){
-      const img = document.getElementById(ensembleIds[i]);
-      const r = rNums[i];
-      img.src = `${cosmoDir}/wd_r${r}_lead_time${L}_zoom.png?v=${BUILD_VER}`;
+    const L   = leadEns[idx];
+    const tag = combiTimes[idx];
+
+    // COSMO ensembles: Forecast_r{r}_lead_time{L}_zoom.png
+    for (let i = 0; i < ensembleIds.length; i++){
+      const imgId = ensembleIds[i];
+      const r     = rNums[i];
+      const img   = document.getElementById(imgId);
+      if (!img) continue;
+      img.src = `${cosmoDir}/Forecast_r${r}_lead_time${L}_zoom.png?v=${BUILD_VER}`;
     }
-    // Combiprecip
-    document.getElementById("img_combi").src =
-      `${combiDir}/wd_det_lead_time${Lc}_zoom.png?v=${BUILD_VER}`;
 
-    slider.value = idx;
+    // Combiprecip: Combiprecip_{TIMESTAMP}_zoom.png
+    const combiImg = document.getElementById("img_combi");
+    if (combiImg){
+      combiImg.src = `${combiDir}/Combiprecip_${tag}_zoom.png?v=${BUILD_VER}`;
+    }
+
+    slider.value = String(idx);
   }
 
   slider.addEventListener("input", e => setImages(e.target.value));
+
+  // Optional: arrow keys navigation
   window.addEventListener("keydown", e => {
-    if (e.key === "ArrowRight") setImages(Number(slider.value)+1);
-    if (e.key === "ArrowLeft")  setImages(Number(slider.value)-1);
+    if (e.key === "ArrowRight") setImages(Number(slider.value) + 1);
+    if (e.key === "ArrowLeft")  setImages(Number(slider.value) - 1);
   });
 
-  setImages(0);   // start at lead_time0
+  // Initialize
+  setImages(0);
 </script>
 </body>
 </html>
+
 
