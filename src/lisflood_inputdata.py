@@ -423,96 +423,114 @@ def crop_deterministic_Combiprecip(
     y_name: str = "y",
     dem_crs: str = "EPSG:2056",
 ):
-    """
-    Crop a Combiprecip NetCDF to the DEM footprint and a set of timestamps.
-
-    Parameters
-    ----------
-    orig_nc : str
-        Path to input Combiprecip NetCDF.
-    dem_file : str
-        Raster used only to read bounds (xmin,ymin,xmax,ymax). CRS assumed LV95 unless overridden.
-    output_nc : str
-        Output NetCDF path.
-    selected_times : list[str or datetime64-like]
-        Times to extract (ISO strings are fine).
-    time_name : str, default 'REFERENCE_TS'
-        Name of the time coordinate in the input file.
-    var_name : str, default 'CPC'
-        Name of the precipitation variable in the input file.
-    x_name : str, default 'x'
-        Name of the x coordinate.
-    y_name : str, default 'y'
-        Name of the y coordinate.
-    dem_crs : str, default 'EPSG:2056'
-        CRS to write on the DEM if missing (just to silence warnings).
-    """
-
-    # 1) DEM bounds (xmin, ymin, xmax, ymax)
-    dem = (
-        rxr.open_rasterio(dem_file, masked=True)
-           .sel(band=1)
-    )
+    # --------------------------------------------------
+    # 1) DEM bounds
+    # --------------------------------------------------
+    dem = rxr.open_rasterio(dem_file, masked=True).sel(band=1)
     if not dem.rio.crs:
         dem = dem.rio.write_crs(dem_crs)
+
     left, bottom, right, top = dem.rio.bounds()
     print(f"DEM bounds ▶ X {left:.0f}→{right:.0f}, Y {bottom:.0f}→{top:.0f}")
 
-    # 2) Open NetCDF
+    # --------------------------------------------------
+    # 2) Open NetCDF and checks
+    # --------------------------------------------------
     ds = xr.open_dataset(orig_nc)
 
-    # sanity checks
     for cname in (time_name, x_name, y_name):
         if cname not in ds.coords:
-            raise KeyError(f"Coordinate '{cname}' not found in {list(ds.coords)}")
+            raise KeyError(f"Coordinate '{cname}' not found. Available: {list(ds.coords)}")
     if var_name not in ds.data_vars:
-        raise KeyError(f"Variable '{var_name}' not found in {list(ds.data_vars)}")
+        raise KeyError(f"Variable '{var_name}' not found. Available: {list(ds.data_vars)}")
 
-    # Normalize time array
     selected_times = np.array(selected_times, dtype="datetime64[ns]")
 
-    # Slicing that respects axis direction
-    x_vals = ds[x_name].values
-    y_vals = ds[y_name].values
-    x_slice = slice(left, right) if x_vals[0] < x_vals[-1] else slice(right, left)
-    y_slice = slice(top, bottom) if y_vals[0] > y_vals[-1] else slice(bottom, top)
+    # --------------------------------------------------
+    # 3) Compute CPC dx/dy and expand crop by half-cell
+    # --------------------------------------------------
+    x_vals = ds[x_name].values.astype(float)
+    y_vals = ds[y_name].values.astype(float)
 
-    # 3) Subset in time & space
-    ds_sel = (
-        ds.sel({time_name: selected_times})
-          .sel({x_name: x_slice, y_name: y_slice})
-    )
+    if len(x_vals) < 2 or len(y_vals) < 2:
+        raise ValueError("x/y coordinates too short to infer dx/dy")
+
+    dx = float(np.median(np.diff(np.sort(x_vals))))
+    dy = float(np.median(np.diff(np.sort(y_vals))))
+    dy_abs = abs(dy)
+
+    print(f"CPC spacing ▶ dx={dx:.1f}  dy={dy:.1f}")
+
+    # Expand DEM bbox by half a CPC cell so outer CPC cells are included
+    x_min = left  - dx/2
+    x_max = right + dx/2
+    y_min = bottom - dy_abs/2
+    y_max = top    + dy_abs/2
+
+    # Respect axis direction for slice
+    x_slice = slice(x_min, x_max) if x_vals[0] < x_vals[-1] else slice(x_max, x_min)
+    y_slice = slice(y_max, y_min) if y_vals[0] > y_vals[-1] else slice(y_min, y_max)
+
+    # --------------------------------------------------
+    # 4) Subset time + expanded space
+    # --------------------------------------------------
+    ds_sel = ds.sel({time_name: selected_times}).sel({x_name: x_slice, y_name: y_slice})
+
     if ds_sel.sizes.get(time_name, 0) == 0:
         raise ValueError("No matching time steps after selection.")
+    if ds_sel.sizes.get(x_name, 0) == 0 or ds_sel.sizes.get(y_name, 0) == 0:
+        raise ValueError("Spatial crop returned empty x or y dimension.")
 
-    print(f"Selected {ds_sel.sizes[time_name]} steps; spatial crop done.")
+    print(
+        f"Selected steps: {ds_sel.sizes[time_name]} | "
+        f"Crop size: x={ds_sel.sizes[x_name]}, y={ds_sel.sizes[y_name]}"
+    )
 
-    # 4) Extract variable and reorder dims → (time, y, x)
-    da = ds_sel[var_name]
-    da = da.transpose(time_name, y_name, x_name)
+    # --- Print resulting bounds (center coords)
+    x_out = ds_sel[x_name].values.astype(float)
+    y_out = ds_sel[y_name].values.astype(float)
+
+    print("NC bounds (centers):",
+          (float(x_out.min()), float(y_out.min()), float(x_out.max()), float(y_out.max())))
+
+    # If you want “cell-edge bbox” (more meaningful for raster extents)
+    out_left   = float(x_out.min() - dx/2)
+    out_right  = float(x_out.max() + dx/2)
+    out_bottom = float(y_out.min() - dy_abs/2)
+    out_top    = float(y_out.max() + dy_abs/2)
+    print("NC bbox (edges)  ≈", (out_left, out_bottom, out_right, out_top))
+
+    # --------------------------------------------------
+    # 5) Extract variable and reorder dims → (time, y, x)
+    # --------------------------------------------------
+    da = ds_sel[var_name].transpose(time_name, y_name, x_name)
+
     data = np.nan_to_num(da.values.astype(np.float32), nan=0.0)
-    t = da.coords[time_name].values.astype("datetime64[ns]")
     x = da.coords[x_name].values.astype(np.float32)
     y = da.coords[y_name].values.astype(np.float32)
+
     nt, ny, nx = data.shape
 
-    # 5) Write NetCDF (variable name 'rainfall_depth')
+    # --------------------------------------------------
+    # 6) Write NetCDF
+    # --------------------------------------------------
     nc = Dataset(output_nc, "w")
 
     nc.createDimension("time", nt)
     nc.createDimension("x", nx)
     nc.createDimension("y", ny)
 
+    # time float64: 0.0..N-1
     tv = nc.createVariable("time", "f8", ("time",))
+    tv.long_name = "time_step"
+    tv.units = "1"
+    tv.axis = "T"
+    tv[:] = np.arange(nt, dtype=np.float64)
+
     xv = nc.createVariable("x", "f4", ("x",))
     yv = nc.createVariable("y", "f4", ("y",))
-
-    tv.units = "seconds since 1970-01-01 00:00:00"
-    tv.axis = "T"
     xv.units = "m"; xv.axis = "X"
     yv.units = "m"; yv.axis = "Y"
-
-    tv[:] = np.arange(nt, dtype=np.float32)
     xv[:] = x
     yv[:] = y
 
@@ -524,13 +542,17 @@ def crop_deterministic_Combiprecip(
     rv.standard_name = "precipitation_amount"
     rv[:] = data
 
-    nc.description = "Cropped deterministic CPC rainfall"
-    nc.history     = f"Created on {date.today().isoformat()}"
-    nc.source      = "CPC deterministic forecast cropped to DEM footprint"
-    nc.close()
+    nc.description = "Cropped deterministic CPC rainfall (half-cell expanded bbox)"
+    nc.history = f"Created on {date.today().isoformat()}"
+    nc.source = "CPC deterministic forecast cropped to DEM footprint"
 
+    nc.close()
     ds.close()
+
     print(f"✔ Saved: {output_nc}")
+    print("✔ time written as float64: 0.0..N-1")
+
+
 
 ##########################################################################################
 #####################CROIP COMBIPRECIP WITH DEM ADDED FROM QGIS ########################

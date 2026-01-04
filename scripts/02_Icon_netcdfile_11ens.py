@@ -2,7 +2,7 @@
 import os, sys, argparse
 
 # ─── make sure your src/ folder is on PYTHONPATH ───────────────────────────────
-SRC = "/storage/homefs/ge24z347/Liestal_event/src"
+SRC = "/storage/homefs/ge24z347/Zell_event/src"
 sys.path.insert(0, SRC)
 
 from lisflood_inputdata import crop_icon_cosmo_to_dem

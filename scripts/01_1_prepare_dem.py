@@ -3,11 +3,12 @@ import os
 import sys
 import argparse
 
-# make sure your src/ folder is on PYTHONPATH
-sys.path.insert(0, os.path.abspath(os.path.join(__file__, "..", "..", "src")))
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.abspath(os.path.join(HERE, "..", "src"))   # <- adjust if needed
+sys.path.insert(0, SRC)
 
 from DEM_processing import (
-    resnap_dem_to_combiprecip,  # <- already in your DEM_processing
+    resnap_dem_to_combiprecip,
     convert_tif_to_asc,
     rename_file_extension
 )
@@ -18,6 +19,8 @@ def main():
     )
     parser.add_argument("--input-tif", required=True,
                         help="Path to input DEM GeoTIFF (.tif)")
+    parser.add_argument("--full-dem", required=True,
+                        help="Full domain DEM GeoTIFF (base grid)")
     parser.add_argument("--output-dem", required=True,
                         help="Path to final .dem file")
     parser.add_argument("--snap-res", type=int, default=1000,
@@ -29,7 +32,9 @@ def main():
     snapped_bounds = resnap_dem_to_combiprecip(
         input_dem=args.input_tif,
         output_dem=snapped_tif,
-        snap_res=args.snap_res
+        snap_res=args.snap_res,
+        mode="out",
+        full_dem=args.full_dem
     )
 
     # --- Step 2: Convert to Esri ASCII (.asc) ---

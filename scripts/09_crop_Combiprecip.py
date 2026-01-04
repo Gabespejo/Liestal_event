@@ -2,7 +2,7 @@
 import sys, argparse
 
 # Make sure your src/ is on the path
-sys.path.insert(0, "/storage/homefs/ge24z347/Liestal_event/src/")
+sys.path.insert(0, "/storage/homefs/ge24z347/Zell_event/src/")
 
 from lisflood_inputdata import crop_deterministic_Combiprecip
 

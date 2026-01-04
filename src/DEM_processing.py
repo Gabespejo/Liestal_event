@@ -255,10 +255,11 @@ def snap_bounds_to_grid(bounds, base=1000, mode="in"):
     """
     Snap bounds to nearest multiple of base (e.g. 1000 m).
 
-    mode="out" → expand outward (may add NODATA borders)
-    mode="in"  → shrink inward (no NODATA, but smaller extent)
+    mode="out" → expand outward to nearest grid lines
+    mode="in"  → shrink inward to nearest grid lines
     """
     minx, miny, maxx, maxy = bounds
+
     if mode == "out":
         minx = (minx // base) * base
         miny = (miny // base) * base
@@ -267,60 +268,132 @@ def snap_bounds_to_grid(bounds, base=1000, mode="in"):
     elif mode == "in":
         minx = ((minx + base - 1) // base) * base  # ceil up
         miny = ((miny + base - 1) // base) * base
-        maxx = (maxx // base) * base                # floor down
+        maxx = (maxx // base) * base               # floor down
         maxy = (maxy // base) * base
     else:
         raise ValueError("mode must be 'out' or 'in'")
-    return minx, miny, maxx, maxy
+
+    return float(minx), float(miny), float(maxx), float(maxy)
 
 
-def resnap_dem_to_combiprecip(input_dem, output_dem, snap_res=1000, mode="in"):
+def resnap_dem_to_combiprecip(
+    input_dem: str,
+    output_dem: str,
+    snap_res: int = 1000,
+    mode: str = "out",
+    full_dem: str | None = None,
+    resampling: str = "bilinear",
+    enforce_epsg2056: bool = False,
+):
     """
-    Resnap an existing DEM so its bounding box aligns to the 1 km Combiprecip grid.
-    
-    Parameters
-    ----------
-    input_dem : str
-        Path to input DEM (GeoTIFF).
-    output_dem : str
-        Path to output resnapped DEM (GeoTIFF).
-    snap_res : int, default=1000
-        Grid size to snap to (Combiprecip is 1 km).
-    mode : str, "in" or "out"
-        - "in": shrink inward → smaller DEM, no NODATA padding
-        - "out": expand outward → same/larger DEM, may add NODATA
+    Robust for ANY resolution (2m / 1m / 0.5m / ...)
+
+    Output extent = snapped bounds around input_dem (aligned to 1 km grid).
+    Values:
+      - start from full_dem (base) within snapped extent
+      - overwrite with input_dem wherever input_dem has data
+
+    No NODATA padding is introduced (because full_dem supplies values).
+
+    Notes:
+    - CRS is not forced, but full_dem CRS must match input_dem CRS.
+    - If enforce_epsg2056=True, both must be EPSG:2056 or it raises.
     """
-    with rasterio.open(input_dem) as src:
-        # Original bounds
-        bounds = src.bounds
-        print(f"Original DEM bounds: {bounds}")
 
-        # Snap to 1 km grid
-        snapped = snap_bounds_to_grid(bounds, base=snap_res, mode=mode)
-        print(f"Snapped DEM bounds ({mode}): {snapped}")
+    if full_dem is None:
+        raise ValueError("full_dem must be provided (base DEM for filling).")
 
-        # Compute window corresponding to snapped extent
-        window = from_bounds(*snapped, transform=src.transform)
-        window = window.round_offsets().round_lengths()
+    if mode not in ("in", "out"):
+        raise ValueError("mode must be 'in' or 'out'")
 
-        # Read data in that window (no padding if mode="in")
-        data = src.read(1, window=window)
+    resampling_map = {
+        "nearest": Resampling.nearest,
+        "bilinear": Resampling.bilinear,
+        "cubic": Resampling.cubic,
+    }
+    rs = resampling_map.get(resampling, Resampling.bilinear)
 
-        # Define new transform
-        transform = src.window_transform(window)
+    os.makedirs(os.path.dirname(os.path.abspath(output_dem)), exist_ok=True)
 
-        # Write new DEM
-        profile = src.profile
-        profile.update({
-            "height": data.shape[0],
-            "width": data.shape[1],
-            "transform": transform
-        })
+    # --- 1) read input (small) DEM and compute snapped bounds ---
+    with rasterio.open(input_dem) as s:
+        if s.crs is None:
+            raise ValueError("input_dem CRS is None. Define CRS first.")
+        small_crs = s.crs
+        small_transform = s.transform
+        small_nodata = s.nodata
+        small_data = s.read(1).astype(np.float32)
 
-        with rasterio.open(output_dem, "w", **profile) as dst:
-            dst.write(data, 1)
+        # snapped extent based on SMALL DEM bounds
+        snapped = snap_bounds_to_grid(s.bounds, base=snap_res, mode=mode)
 
-    print(f"✔ Resnapped DEM saved to {output_dem}")
+    # --- 2) crop full_dem to snapped bounds (defines output grid/extent) ---
+    with rasterio.open(full_dem) as f:
+        if f.crs != small_crs:
+            raise ValueError(f"CRS mismatch: input_dem={small_crs}, full_dem={f.crs}")
+
+        if enforce_epsg2056:
+            try:
+                if int(small_crs.to_epsg() or -1) != 2056:
+                    raise ValueError(f"CRS must be EPSG:2056, got {small_crs}")
+            except Exception:
+                raise ValueError(f"CRS must be EPSG:2056, got {small_crs}")
+
+        # ensure snapped bounds lie inside full_dem
+        fb = f.bounds
+        if (snapped[0] < fb.left or snapped[1] < fb.bottom or
+            snapped[2] > fb.right or snapped[3] > fb.top):
+            raise ValueError(
+                "Snapped bounds exceed full_dem extent.\n"
+                "Use a larger full_dem OR set mode='in' to shrink."
+            )
+
+        win = from_bounds(*snapped, transform=f.transform)
+        win = win.round_offsets().round_lengths()
+
+        # base is full_dem cropped to snapped window (so output is NOT huge)
+        base_crop = f.read(1, window=win).astype(np.float32)
+        out_transform = f.window_transform(win)
+
+        out_profile = f.profile.copy()
+        out_profile.update(
+            height=base_crop.shape[0],
+            width=base_crop.shape[1],
+            transform=out_transform,
+            dtype="float32",
+            compress="lzw",
+        )
+
+    # --- 3) reproject input_dem onto output grid and overwrite base ---
+    tmp = np.full(base_crop.shape, np.nan, dtype=np.float32)
+
+    reproject(
+        source=small_data,
+        destination=tmp,
+        src_transform=small_transform,
+        src_crs=small_crs,
+        src_nodata=small_nodata,
+        dst_transform=out_transform,
+        dst_crs=small_crs,
+        dst_nodata=np.nan,
+        resampling=rs,
+    )
+
+    mask = ~np.isnan(tmp)
+    base_crop[mask] = tmp[mask]
+
+    # --- 4) write output ---
+    with rasterio.open(output_dem, "w", **out_profile) as dst:
+        dst.write(base_crop, 1)
+
+    print("✔ DEM prepared (cropped to snapped extent + filled from full_dem)")
+    print(f"✔ input_dem:   {input_dem}")
+    print(f"✔ full_dem:    {full_dem}")
+    print(f"✔ output_dem:  {output_dem}")
+    print(f"✔ snapped:     {snapped}")
+    print(f"✔ out shape:   {base_crop.shape}  (rows, cols)")
+    print(f"✔ out res:     {out_profile['transform'][0]} m")
+
     return snapped
 
 
