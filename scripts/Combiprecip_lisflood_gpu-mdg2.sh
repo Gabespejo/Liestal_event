@@ -1,23 +1,21 @@
 #!/bin/bash
-#------------------------
-#SBATCH --account=gratis
-#------------------------
+#SBATCH --job-name=LISFLOOD_Combiprecip
+#SBATCH --gres=gpu:a100:1
 #SBATCH --partition=gpu-invest
 #SBATCH --qos=job_gpu_preemptable
+#SBATCH --time=15:00:00
 
-#SBATCH --job-name="LISFLOOD_Combiprecip"
-#SBATCH --time=6:00:00
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem-per-cpu=10G
-#SBATCH --gres=gpu:rtx4090:1
-#SBATCH --output=/storage/homefs/ge24z347/LISFLOOD_FP_8_1/scripts/logs/%x_%j.out
-#SBATCH --error=/storage/homefs/ge24z347/LISFLOOD_FP_8_1/scripts/logs/%x_%j.err
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=80G
+
+#SBATCH --output=/storage/homefs/ge24z347/gpu-mwdg2/scripts/logs/%x_%j.out
+#SBATCH --error=/storage/homefs/ge24z347/gpu-mwdg2/scripts/logs/%x_%j.err
 
 ## ---- EMAIL NOTIFICATION ----
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=gabriela.espejogutierrez@unibe.ch   
-
+#SBATCH --mail-user=gabriela.espejogutierrez@unibe.ch
 
 echo "========== SLURM job started at $(date) =========="
 
@@ -31,9 +29,9 @@ if [ -z "$CASE_NAME" ]; then
   exit 1
 fi
 
-BUILD_DIR="/storage/homefs/ge24z347/LISFLOOD_FP_8_1/build/${CASE_NAME}"
+BUILD_DIR="/storage/homefs/ge24z347/gpu-mwdg2/build/${CASE_NAME}"
 PAR_FILE="${BUILD_DIR}/${CASE_NAME}.par"
-EXEC="/storage/homefs/ge24z347/LISFLOOD_FP_8_1/build/lisflood"
+EXEC="/storage/homefs/ge24z347/gpu-mwdg2/build/gpu-mwdg2"
 
 echo "Running case: $CASE_NAME"
 echo "Parameter file: $PAR_FILE"

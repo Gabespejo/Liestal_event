@@ -1,0 +1,8 @@
+/var/spool/slurmd.spool/job42491396/slurm_script: line 15: /storage/homefs/ge24z347/miniconda3/etc/profile.d/conda.sh: No such file or directory
+
+CondaError: Run 'conda init' before 'conda activate'
+
+Traceback (most recent call last):
+  File "/storage/homefs/ge24z347/Zell_event/scripts/vtkfiles_to_tif.py", line 6, in <module>
+    import rasterio
+ModuleNotFoundError: No module named 'rasterio'

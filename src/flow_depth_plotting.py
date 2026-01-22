@@ -1852,7 +1852,7 @@ def plot_deterministic_perhour(
 
 ################################################################################################
 ######################## ASCII in netcdfile ###############################################
-import os, re
+import os
 import numpy as np
 import xarray as xr
 import rioxarray as rxr
@@ -1873,16 +1873,16 @@ def ascii_single_member_to_netcdf(
     dtype: str = "float32",
     complevel: int = 4,
     chunks: dict | None = None,
-    step_regex: str = r"-(\d{4})\.(?:\w+)$",
+    step_regex: str = r"-(\d{4})\.(?:\w+)$",  # kept for backward compatibility (unused; robust parser used)
     strict_align: bool = True,
     use_nan_fill: bool = False,
     wet_threshold: float = 0.0,          # mask derived fields where wd < threshold
     skip_missing: bool = False,
 
-    # ---- TIME SETTINGS (what you asked for) ----
+    # ---- TIME SETTINGS ----
     dim_name: str = "REFERENCE_TS",      # dimension name in NetCDF
     reference_start: str = "2022-05-05T12:00:00.000000000",  # first timestamp
-    dt_minutes: int = 60,                # next step = +60 minutes (hourly)
+    dt_minutes: int = 60,                # next step = +dt_minutes
 
     realization: int | None = None,      # optional 1-length realization dim
 ) -> str:
@@ -1891,49 +1891,94 @@ def ascii_single_member_to_netcdf(
     write a NetCDF where the time dimension is `dim_name` and is datetime64[ns].
 
     Time mapping:
-      - The FIRST file you read (index = `start`) is exactly `reference_start`
+      - The FIRST file read (index = `start`) is exactly `reference_start`
       - Each next file is +dt_minutes minutes
-    So if start=0: 0000 -> reference_start, 0001 -> reference_start + 1 hour, ...
-    If start=12: 0012 -> reference_start, 0013 -> reference_start + 1 hour, ...
     """
 
     # -------------------- helpers --------------------
 
     def _open_ascii(path: str) -> xr.DataArray:
+        """Open an ASCII raster (AAIGrid-style) via rioxarray, return 2D (y,x)."""
         try:
             da = rxr.open_rasterio(path, masked=True, chunks=chunks)
         except Exception:
             da = rxr.open_rasterio(path, masked=True, chunks=chunks, driver="AAIGrid")
+        # rioxarray returns (band, y, x) -> squeeze to (y, x)
         return da.squeeze("band", drop=True)
 
     def _build_range(ext: str) -> list[str]:
+        """Build file list for indices start..end inclusive."""
         return [os.path.join(folder, f"{base}-{i:0{width}d}.{ext}") for i in range(start, end + 1)]
 
+    def _parse_step(fname: str) -> int:
+        """
+        Robustly parse step from filenames like:
+          <base>-0000.wd
+          <base>-0123.Vx
+        """
+        b = os.path.basename(fname)
+        stem, _ = os.path.splitext(b)  # e.g. "Zell_2m_accv14-0000"
+        if "-" not in stem:
+            raise ValueError(f"Cannot parse timestep (no '-') from filename: {b}")
+        tail = stem.split("-")[-1]
+        if not tail.isdigit():
+            raise ValueError(f"Cannot parse timestep (not digits) from filename: {b}")
+        return int(tail)
+
     def _match_axis_len(arr: xr.DataArray, target_len: int, axis_name: str) -> xr.DataArray:
-        cur = arr.sizes[axis_name]
+        """
+        Pad/crop a DataArray along axis_name to match target_len.
+        Handles common LISFLOOD face vs cell dimension +/-1 and general mismatch.
+        """
+        cur = arr.sizes.get(axis_name, None)
+        if cur is None:
+            raise KeyError(f"Axis '{axis_name}' not found in array dims {arr.dims}")
+
         if cur == target_len:
             return arr
+
+        # If off by 1, try best-guess fix (common with face/cell grids)
         if cur == target_len - 1:
+            # pad one cell at both ends (duplicate edges) then slice
             first = arr.isel({axis_name: 0})
-            last  = arr.isel({axis_name: cur - 1})
+            last = arr.isel({axis_name: cur - 1})
             arr = xr.concat(
                 [first.expand_dims({axis_name: [0]}), arr, last.expand_dims({axis_name: [0]})],
-                dim=axis_name
+                dim=axis_name,
             )
             return arr.isel({axis_name: slice(0, target_len)})
+
         if cur == target_len + 1:
+            # drop one at each side
             return arr.isel({axis_name: slice(1, cur - 1)})
+
+        # If larger, center-crop
         if cur > target_len:
             off = (cur - target_len) // 2
             return arr.isel({axis_name: slice(off, off + target_len)})
+
+        # If smaller, edge-pad
         need = target_len - cur
         left_n = need // 2
         right_n = need - left_n
-        left_block = xr.concat([arr.isel({axis_name: 0})] * left_n, dim=axis_name)
-        right_block = xr.concat([arr.isel({axis_name: cur - 1})] * right_n, dim=axis_name)
-        return xr.concat([left_block, arr, right_block], dim=axis_name)
+
+        if cur == 0:
+            raise ValueError(f"Cannot pad axis '{axis_name}' of length 0 to {target_len}.")
+
+        left_block = xr.concat([arr.isel({axis_name: 0})] * left_n, dim=axis_name) if left_n else None
+        right_block = xr.concat([arr.isel({axis_name: cur - 1})] * right_n, dim=axis_name) if right_n else None
+
+        parts = []
+        if left_block is not None:
+            parts.append(left_block)
+        parts.append(arr)
+        if right_block is not None:
+            parts.append(right_block)
+
+        return xr.concat(parts, dim=axis_name)
 
     def _harmonize_to_ref_shape(slices: list[xr.DataArray]) -> list[xr.DataArray]:
+        """Force all slices to match the first slice's (y,x) sizes."""
         ref_y, ref_x = slices[0].sizes["y"], slices[0].sizes["x"]
         out = []
         for s in slices:
@@ -1943,7 +1988,12 @@ def ascii_single_member_to_netcdf(
         return out
 
     def _stack_one_var(files: list[str], *, var_name: str) -> xr.DataArray | None:
+        """
+        Read a sequence of rasters for one variable, stack along dim_name.
+        Coordinates for dim_name are integer steps parsed from filenames.
+        """
         triplets: list[tuple[int, str, xr.DataArray]] = []
+
         for f in files:
             if not os.path.exists(f):
                 if skip_missing:
@@ -1960,8 +2010,7 @@ def ascii_single_member_to_netcdf(
             if nd is not None:
                 da.rio.write_nodata(nd, inplace=True)
 
-            m = re.search(step_regex, os.path.basename(f))
-            step_val = int(m.group(1)) if m else len(triplets)
+            step_val = _parse_step(f)
             triplets.append((step_val, f, da))
 
         if not triplets:
@@ -1985,9 +2034,11 @@ def ascii_single_member_to_netcdf(
         return stack
 
     def _center_x(da: xr.DataArray) -> xr.DataArray:
+        """Average adjacent x faces to cell-centres (requires x>=2)."""
         return 0.5 * (da.isel(x=slice(0, -1)) + da.isel(x=slice(1, None)))
 
     def _center_y(da: xr.DataArray) -> xr.DataArray:
+        """Average adjacent y faces to cell-centres (requires y>=2)."""
         return 0.5 * (da.isel(y=slice(0, -1)) + da.isel(y=slice(1, None)))
 
     # -------------------- main workflow --------------------
@@ -2011,22 +2062,23 @@ def ascii_single_member_to_netcdf(
     if "water_depth" not in raw:
         raise ValueError("Could not read 'water_depth' series—can't define the target grid.")
 
+    # Ensure canonical order
     wd = raw["water_depth"].transpose(dim_name, "y", "x")
 
     # ---- build REFERENCE_TS datetime coordinate ----
-    # steps are extracted from filenames (e.g., 0..167), but we want:
-    # FIRST READ FILE (index=start) = reference_start
     steps = wd[dim_name].values.astype("int64")
     start64 = np.datetime64(reference_start, "ns")
     dt = np.timedelta64(int(dt_minutes), "m")
-    ref_ts = start64 + (steps - int(start)) * dt  # <-- key line
+    ref_ts = start64 + (steps - int(start)) * dt
 
+    # Target grid comes from wd
     x_wd = wd["x"].values
     y_wd = wd["y"].values
     nx_wd = x_wd.size
     ny_wd = y_wd.size
 
     def _align_to_wd_grid(da: xr.DataArray) -> xr.DataArray:
+        """Force array to match wd (y,x) sizes, and assign wd coords."""
         da = _match_axis_len(da, nx_wd, "x")
         da = _match_axis_len(da, ny_wd, "y")
         return da.assign_coords(x=x_wd, y=y_wd)
@@ -2035,29 +2087,48 @@ def ascii_single_member_to_netcdf(
     ds = xr.Dataset(coords={dim_name: ref_ts, "y": y_wd, "x": x_wd})
     ds[dim_name].attrs.update(standard_name="time", long_name="reference timestamp")
 
+    # Always write water depth
     ds["water_depth"] = wd.assign_coords({dim_name: ref_ts})
     ds["water_depth"].attrs.update(long_name="water depth", units="m")
 
+    # ---- Cell-centred face fields (safe) ----
     if "vel_x" in raw:
-        vx_c = _align_to_wd_grid(_center_x(raw["vel_x"].transpose(dim_name, "y", "x")))
-        ds["vel_x_c"] = vx_c.assign_coords({dim_name: ref_ts})
-        ds["vel_x_c"].attrs.update(long_name="cell-centred velocity x", units="m s-1")
+        Vx = raw["vel_x"].transpose(dim_name, "y", "x")
+        if Vx.sizes.get("x", 0) < 2:
+            print(f"WARNING: vel_x has x<2 (sizes={dict(Vx.sizes)}). Skipping vel_x_c.")
+        else:
+            vx_c = _align_to_wd_grid(_center_x(Vx))
+            ds["vel_x_c"] = vx_c.assign_coords({dim_name: ref_ts})
+            ds["vel_x_c"].attrs.update(long_name="cell-centred velocity x", units="m s-1")
 
     if "vel_y" in raw:
-        vy_c = _align_to_wd_grid(_center_y(raw["vel_y"].transpose(dim_name, "y", "x")))
-        ds["vel_y_c"] = vy_c.assign_coords({dim_name: ref_ts})
-        ds["vel_y_c"].attrs.update(long_name="cell-centred velocity y", units="m s-1")
+        Vy = raw["vel_y"].transpose(dim_name, "y", "x")
+        if Vy.sizes.get("y", 0) < 2:
+            print(f"WARNING: vel_y has y<2 (sizes={dict(Vy.sizes)}). Skipping vel_y_c.")
+        else:
+            vy_c = _align_to_wd_grid(_center_y(Vy))
+            ds["vel_y_c"] = vy_c.assign_coords({dim_name: ref_ts})
+            ds["vel_y_c"].attrs.update(long_name="cell-centred velocity y", units="m s-1")
 
     if "flux_x" in raw:
-        qx_c = _align_to_wd_grid(_center_x(raw["flux_x"].transpose(dim_name, "y", "x")))
-        ds["flux_x_c"] = qx_c.assign_coords({dim_name: ref_ts})
-        ds["flux_x_c"].attrs.update(long_name="cell-centred discharge x", units="m3 s-1")
+        Qx = raw["flux_x"].transpose(dim_name, "y", "x")
+        if Qx.sizes.get("x", 0) < 2:
+            print(f"WARNING: flux_x has x<2 (sizes={dict(Qx.sizes)}). Skipping flux_x_c.")
+        else:
+            qx_c = _align_to_wd_grid(_center_x(Qx))
+            ds["flux_x_c"] = qx_c.assign_coords({dim_name: ref_ts})
+            ds["flux_x_c"].attrs.update(long_name="cell-centred discharge x", units="m3 s-1")
 
     if "flux_y" in raw:
-        qy_c = _align_to_wd_grid(_center_y(raw["flux_y"].transpose(dim_name, "y", "x")))
-        ds["flux_y_c"] = qy_c.assign_coords({dim_name: ref_ts})
-        ds["flux_y_c"].attrs.update(long_name="cell-centred discharge y", units="m3 s-1")
+        Qy = raw["flux_y"].transpose(dim_name, "y", "x")
+        if Qy.sizes.get("y", 0) < 2:
+            print(f"WARNING: flux_y has y<2 (sizes={dict(Qy.sizes)}). Skipping flux_y_c.")
+        else:
+            qy_c = _align_to_wd_grid(_center_y(Qy))
+            ds["flux_y_c"] = qy_c.assign_coords({dim_name: ref_ts})
+            ds["flux_y_c"].attrs.update(long_name="cell-centred discharge y", units="m3 s-1")
 
+    # ---- Magnitudes ----
     if ("vel_x_c" in ds) and ("vel_y_c" in ds):
         ds["vel_mag"] = xr.apply_ufunc(np.hypot, ds["vel_x_c"], ds["vel_y_c"])
         ds["vel_mag"].attrs.update(long_name="speed magnitude", units="m s-1")
@@ -2066,32 +2137,59 @@ def ascii_single_member_to_netcdf(
         ds["flux_mag"] = xr.apply_ufunc(np.hypot, ds["flux_x_c"], ds["flux_y_c"])
         ds["flux_mag"].attrs.update(long_name="discharge magnitude", units="m3 s-1")
 
+    # ---- Representative per-cell fields (SAFE: no empty slicing) ----
+    # discharge_cell: average of |Qx| and |Qy| after independent cell-centring
     if ("flux_x" in raw) and ("flux_y" in raw):
         Qx = raw["flux_x"].transpose(dim_name, "y", "x")
         Qy = raw["flux_y"].transpose(dim_name, "y", "x")
-        Qrep = (
-            np.abs(Qx.isel(x=slice(0, -1))) + np.abs(Qx.isel(x=slice(1, None))) +
-            np.abs(Qy.isel(y=slice(0, -1))) + np.abs(Qy.isel(y=slice(1, None)))
-        ) * 0.25
-        ds["discharge_cell"] = _align_to_wd_grid(Qrep).assign_coords({dim_name: ref_ts})
-        ds["discharge_cell"].attrs.update(long_name="representative per-cell discharge (avg |faces|)", units="m3 s-1")
 
+        if (Qx.sizes.get("x", 0) < 2) or (Qy.sizes.get("y", 0) < 2):
+            print(
+                "WARNING: skipping discharge_cell (face grid too small). "
+                f"Qx sizes={dict(Qx.sizes)}, Qy sizes={dict(Qy.sizes)}"
+            )
+        else:
+            Qx_c = _align_to_wd_grid(_center_x(np.abs(Qx)))
+            Qy_c = _align_to_wd_grid(_center_y(np.abs(Qy)))
+            Qrep = 0.5 * (Qx_c + Qy_c)
+            ds["discharge_cell"] = Qrep.assign_coords({dim_name: ref_ts})
+            ds["discharge_cell"].attrs.update(
+                long_name="representative per-cell discharge (avg |faces|)",
+                units="m3 s-1",
+            )
+
+    # speed_cell: average of |Vx| and |Vy| after independent cell-centring
     if ("vel_x" in raw) and ("vel_y" in raw):
         Vx = raw["vel_x"].transpose(dim_name, "y", "x")
         Vy = raw["vel_y"].transpose(dim_name, "y", "x")
-        Srep = (
-            np.abs(Vx.isel(x=slice(0, -1))) + np.abs(Vx.isel(x=slice(1, None))) +
-            np.abs(Vy.isel(y=slice(0, -1))) + np.abs(Vy.isel(y=slice(1, None)))
-        ) * 0.25
-        ds["speed_cell"] = _align_to_wd_grid(Srep).assign_coords({dim_name: ref_ts})
-        ds["speed_cell"].attrs.update(long_name="representative per-cell speed (avg |faces|)", units="m s-1")
 
+        if (Vx.sizes.get("x", 0) < 2) or (Vy.sizes.get("y", 0) < 2):
+            print(
+                "WARNING: skipping speed_cell (face grid too small). "
+                f"Vx sizes={dict(Vx.sizes)}, Vy sizes={dict(Vy.sizes)}"
+            )
+        else:
+            Vx_c = _align_to_wd_grid(_center_x(np.abs(Vx)))
+            Vy_c = _align_to_wd_grid(_center_y(np.abs(Vy)))
+            Srep = 0.5 * (Vx_c + Vy_c)
+            ds["speed_cell"] = Srep.assign_coords({dim_name: ref_ts})
+            ds["speed_cell"].attrs.update(
+                long_name="representative per-cell speed (avg |faces|)",
+                units="m s-1",
+            )
+
+    # ---- Wet mask ----
     if wet_threshold > 0:
         wet = ds["water_depth"] >= float(wet_threshold)
-        for vn in ["vel_x_c","vel_y_c","vel_mag","flux_x_c","flux_y_c","flux_mag","discharge_cell","speed_cell"]:
+        for vn in [
+            "vel_x_c", "vel_y_c", "vel_mag",
+            "flux_x_c", "flux_y_c", "flux_mag",
+            "discharge_cell", "speed_cell",
+        ]:
             if vn in ds:
                 ds[vn] = ds[vn].where(wet)
 
+    # ---- CRS / nodata ----
     for v in ds.data_vars:
         if crs:
             ds[v].rio.write_crs(crs, inplace=True)
@@ -2101,14 +2199,17 @@ def ascii_single_member_to_netcdf(
             if use_nan_fill:
                 ds[v] = ds[v].where(ds[v] != nd)
 
+    # ---- Optional realization dim ----
     if realization is not None:
         ds = ds.expand_dims({"realization": [int(realization)]})
         ds = ds.transpose("realization", dim_name, "y", "x", ...)
 
+    # Remove fill attributes that can conflict with encoding
     for v in ds.data_vars:
         ds[v].attrs.pop("_FillValue", None)
         ds[v].attrs.pop("missing_value", None)
 
+    # ---- Encoding ----
     for v in ds.data_vars:
         enc = dict(zlib=True, complevel=int(complevel), dtype=dtype)
         nd = (ds[v].rio.nodata if nodata is None else nodata)
@@ -2121,8 +2222,209 @@ def ascii_single_member_to_netcdf(
         source="LISFLOOD single-member ASCII series, cell-centred on water_depth grid",
         deterministic="true" if realization is None else f"realization {int(realization)}",
     )
+
     ds.to_netcdf(out_nc)
     return out_nc
+
+####################################################################################################
+#########################ASCII FILE SUBGRID TO NETCFILE BECAUSE IT HAS ONLY ONE ####################
+#########################VARIABLE ##################################################################
+
+import os
+import numpy as np
+import xarray as xr
+import rioxarray as rxr
+
+
+def ascii_wdfp_subgrid_to_netcdf(
+    *,
+    out_nc: str,
+    folder: str,
+    base: str,
+    start: int,
+    end: int,
+    width: int = 4,
+    ext: str = "wdfp",                  # <-- your termination
+    var_name: str = "water_depth",      # name inside NetCDF
+    crs: str = "EPSG:2056",
+    nodata: float | None = None,
+    dtype: str = "float32",
+    complevel: int = 4,
+    chunks: dict | None = None,
+    strict_align: bool = True,
+    use_nan_fill: bool = False,
+    skip_missing: bool = False,
+
+    # ---- TIME SETTINGS ----
+    dim_name: str = "REFERENCE_TS",
+    reference_start: str = "2022-05-05T12:00:00.000000000",
+    dt_minutes: int = 60,
+
+    realization: int | None = None,
+) -> str:
+    """
+    Convert LISFLOOD ASCII grids with only one variable terminated by `.wdfp`
+    into a NetCDF with a datetime64[ns] time coordinate.
+
+    Expected filenames:
+      <folder>/<base>-0000.wdfp
+      <folder>/<base>-0001.wdfp
+      ...
+    """
+
+    def _open_ascii(path: str) -> xr.DataArray:
+        try:
+            da = rxr.open_rasterio(path, masked=True, chunks=chunks)
+        except Exception:
+            da = rxr.open_rasterio(path, masked=True, chunks=chunks, driver="AAIGrid")
+        return da.squeeze("band", drop=True)  # (y,x)
+
+    def _build_range() -> list[str]:
+        return [os.path.join(folder, f"{base}-{i:0{width}d}.{ext}") for i in range(start, end + 1)]
+
+    def _parse_step(fname: str) -> int:
+        b = os.path.basename(fname)
+        stem, _ = os.path.splitext(b)  # "<base>-0000"
+        if "-" not in stem:
+            raise ValueError(f"Cannot parse timestep (no '-') from filename: {b}")
+        tail = stem.split("-")[-1]
+        if not tail.isdigit():
+            raise ValueError(f"Cannot parse timestep (not digits) from filename: {b}")
+        return int(tail)
+
+    def _match_axis_len(arr: xr.DataArray, target_len: int, axis_name: str) -> xr.DataArray:
+        cur = arr.sizes.get(axis_name, None)
+        if cur is None:
+            raise KeyError(f"Axis '{axis_name}' not found in array dims {arr.dims}")
+        if cur == target_len:
+            return arr
+
+        if cur == target_len - 1:
+            first = arr.isel({axis_name: 0})
+            last = arr.isel({axis_name: cur - 1})
+            arr = xr.concat(
+                [first.expand_dims({axis_name: [0]}), arr, last.expand_dims({axis_name: [0]})],
+                dim=axis_name,
+            )
+            return arr.isel({axis_name: slice(0, target_len)})
+
+        if cur == target_len + 1:
+            return arr.isel({axis_name: slice(1, cur - 1)})
+
+        if cur > target_len:
+            off = (cur - target_len) // 2
+            return arr.isel({axis_name: slice(off, off + target_len)})
+
+        # pad if smaller
+        need = target_len - cur
+        if cur == 0:
+            raise ValueError(f"Cannot pad axis '{axis_name}' of length 0 to {target_len}.")
+        left_n = need // 2
+        right_n = need - left_n
+        left_block = xr.concat([arr.isel({axis_name: 0})] * left_n, dim=axis_name) if left_n else None
+        right_block = xr.concat([arr.isel({axis_name: cur - 1})] * right_n, dim=axis_name) if right_n else None
+
+        parts = []
+        if left_block is not None:
+            parts.append(left_block)
+        parts.append(arr)
+        if right_block is not None:
+            parts.append(right_block)
+        return xr.concat(parts, dim=axis_name)
+
+    # ---- read & stack ----
+    files = _build_range()
+
+    triplets: list[tuple[int, xr.DataArray]] = []
+    for f in files:
+        if not os.path.exists(f):
+            if skip_missing:
+                continue
+            raise FileNotFoundError(f)
+
+        da = _open_ascii(f)
+        if crs:
+            da.rio.write_crs(crs, inplace=True)
+
+        nd = da.rio.nodata if nodata is None else nodata
+        if nd is not None:
+            da.rio.write_nodata(nd, inplace=True)
+
+        step = _parse_step(f)
+        triplets.append((step, da))
+
+    if not triplets:
+        raise ValueError("No input .wdfp files found to write.")
+
+    triplets.sort(key=lambda t: t[0])
+    steps = np.array([t[0] for t in triplets], dtype="int64")
+    arrays = [t[1] for t in triplets]
+
+    # harmonize shapes if needed
+    if len(arrays) > 1:
+        y0, x0 = arrays[0].sizes["y"], arrays[0].sizes["x"]
+        need_harmonize = any(a.sizes["y"] != y0 or a.sizes["x"] != x0 for a in arrays[1:])
+        if need_harmonize or (not strict_align):
+            arrays2 = []
+            for a in arrays:
+                a2 = _match_axis_len(a, x0, "x")
+                a2 = _match_axis_len(a2, y0, "y")
+                arrays2.append(a2)
+            arrays = arrays2
+
+    stack = xr.concat(arrays, dim=dim_name).assign_coords({dim_name: (dim_name, steps)})
+    stack.name = var_name
+    stack = stack.transpose(dim_name, "y", "x")
+
+    # ---- time coordinate ----
+    start64 = np.datetime64(reference_start, "ns")
+    dt = np.timedelta64(int(dt_minutes), "m")
+    ref_ts = start64 + (steps - int(start)) * dt
+
+    # ---- dataset ----
+    x = stack["x"].values
+    y = stack["y"].values
+
+    ds = xr.Dataset(coords={dim_name: ref_ts, "y": y, "x": x})
+    ds[dim_name].attrs.update(standard_name="time", long_name="reference timestamp")
+
+    ds[var_name] = stack.assign_coords({dim_name: ref_ts})
+    ds[var_name].attrs.update(long_name="water depth", units="m")
+
+    # CRS / nodata / nan fill
+    if crs:
+        ds[var_name].rio.write_crs(crs, inplace=True)
+
+    nd = ds[var_name].rio.nodata if nodata is None else nodata
+    if nd is not None:
+        ds[var_name].rio.write_nodata(nd, inplace=True)
+        if use_nan_fill:
+            ds[var_name] = ds[var_name].where(ds[var_name] != nd)
+
+    # Optional realization dim
+    if realization is not None:
+        ds = ds.expand_dims({"realization": [int(realization)]})
+        ds = ds.transpose("realization", dim_name, "y", "x")
+
+    # Remove fill attrs that can conflict with encoding
+    ds[var_name].attrs.pop("_FillValue", None)
+    ds[var_name].attrs.pop("missing_value", None)
+
+    # Encoding
+    enc = dict(zlib=True, complevel=int(complevel), dtype=dtype)
+    if (nd is not None) and (not use_nan_fill):
+        enc["_FillValue"] = float(nd)
+    ds[var_name].encoding = enc
+
+    ds.attrs.update(
+        Conventions="CF-1.8",
+        source="LISFLOOD single-variable ASCII series (.wdfp)",
+        deterministic="true" if realization is None else f"realization {int(realization)}",
+    )
+
+    ds.to_netcdf(out_nc)
+    return out_nc
+
 ################################################################################################
 ##########################FORECAST DATA SIMULATED TO NETCDFILE##################################
 import os
@@ -2688,8 +2990,14 @@ def plot_water_depths_deterministic_from_netcdfile(
     min_fig_height=6.0,
 ):
     """
-    Plot water_depth from a NetCDF that has NO 'realization' dim.
-    Works with time dim named 'REFERENCE_TS' (datetime64[ns]) or falls back to lead_time/step.
+    Plot water depth-like variable from a NetCDF that has NO 'realization' dim.
+
+    ✅ Now supports variable names in this priority:
+        1) h
+        2) water_depth
+        3) wd
+
+    Works with time dim named 'time' or 'REFERENCE_TS' (datetime64[ns]) or falls back to lead_time/step.
     Title uses the datetime from the NetCDF directly (e.g., 2022-05-05T12:00:00).
     """
 
@@ -2747,7 +3055,6 @@ def plot_water_depths_deterministic_from_netcdfile(
         )
 
     def _fmt_dt(dt64):
-        # dt64 is numpy.datetime64
         return np.datetime_as_string(dt64, unit="s")  # "YYYY-MM-DDTHH:MM:SS"
 
     # ───────────────────────────────────────────────────────────────────
@@ -2756,23 +3063,32 @@ def plot_water_depths_deterministic_from_netcdfile(
     os.makedirs(out_dir, exist_ok=True)
     ds = xr.open_dataset(nc_path)
 
-    # ✅ Time dimension: prefer REFERENCE_TS (your new NetCDF), else lead_time/step
-    if "REFERENCE_TS" in ds.dims:
+    # ✅ Time dimension: prefer "time" (your NetCDF), else REFERENCE_TS, else lead_time/step
+    if "time" in ds.dims:
+        time_dim = "time"
+    elif "REFERENCE_TS" in ds.dims:
         time_dim = "REFERENCE_TS"
     elif "lead_time" in ds.dims:
         time_dim = "lead_time"
     elif "step" in ds.dims:
         time_dim = "step"
     else:
-        raise ValueError("Couldn't find a time dimension named 'REFERENCE_TS', 'lead_time', or 'step'.")
+        raise ValueError("Couldn't find a time dimension named 'time', 'REFERENCE_TS', 'lead_time', or 'step'.")
 
-    # variable name: allow both "water_depth" and older "wd" just in case
-    if "water_depth" in ds.data_vars:
+    # ✅ Variable name priority (prefer smoothed visualization field if available)
+    if "h_smooth" in ds.data_vars:
+        wd_name = "h_smooth"
+    elif "h" in ds.data_vars:
+        wd_name = "h"
+    elif "water_depth" in ds.data_vars:
         wd_name = "water_depth"
     elif "wd" in ds.data_vars:
         wd_name = "wd"
     else:
-        raise ValueError("Variable 'water_depth' (or 'wd') not found in dataset.")
+        raise ValueError(
+        "No variable found: expected one of "
+        "['h_smooth', 'h', 'water_depth', 'wd']."
+        )
 
     # ── domain extent
     x_all = ds["x"].values
@@ -2809,23 +3125,20 @@ def plot_water_depths_deterministic_from_netcdfile(
         bg = None
 
     # ───────────────────────────────────────────────────────────────────
-    # palette (your format, fixed bins & violet overflow)
-    # IMPORTANT: len(colors) must be len(edges)-1
+    # palette
     # ───────────────────────────────────────────────────────────────────
-    edges = [0.05, 0.10, 0.30, 0.50, 1.0, 1.50, 2.0, 2.5, 3.0, 3.5]
+    edges = [0.01, 0.10, 0.30, 0.50, 1.0, 1.50, 2.0, 2.5, 3.0, 3.5]
     colors = [
-        "#f7fcf0",  # 0.05–0.10
-        "#ccebc5",  # 0.10–0.30
-        "#a8ddb5",  # 0.30–0.50
-        "#7bccc4",  # 0.50–1.00
-        "#4eb3d3",  # 1.00–1.50
-        "#2b8cbe",  # 1.50–2.00
-        "#08589e",  # 2.00–2.50
-        "#08306b",  # 2.50–3.00
-        "#54278f",  # 3.00–3.50 (dark violet)
+        "#f7fcf0",
+        "#ccebc5",
+        "#a8ddb5",
+        "#7bccc4",
+        "#4eb3d3",
+        "#2b8cbe",
+        "#08589e",
+        "#08306b",
+        "#54278f",
     ]
-
-    # Overflow class for >= 3.5 m (even darker violet)
     cmap_disc = ListedColormap(colors + ["#4d004b"])
     cmap_disc.set_under((0, 0, 0, 0))
     norm = BoundaryNorm(edges, cmap_disc.N, extend="max")
@@ -2843,7 +3156,7 @@ def plot_water_depths_deterministic_from_netcdfile(
     x_desc = x_sel[0] > x_sel[-1]
     y_desc = y_sel[0] > y_sel[-1]
 
-    times = ds[time_dim].values  # datetime64[ns] for REFERENCE_TS
+    times = ds[time_dim].values
 
     for t_idx, t_val in enumerate(times):
         da_t = da_wd.isel({time_dim: t_idx}).transpose("y", "x")
@@ -2856,20 +3169,19 @@ def plot_water_depths_deterministic_from_netcdfile(
 
         arr = np.where(arr >= threshold, arr, np.nan)
 
-        # ✅ Title uses the datetime from NetCDF directly
         if np.issubdtype(np.asarray(times).dtype, np.datetime64):
             t_txt = _fmt_dt(t_val)
-            title = f"{case_label} — Water depth at {t_txt}"
+            title = f"{case_label} — {wd_name} at {t_txt}"
             file_tag = t_txt.replace(":", "-")
         else:
-            title = f"{case_label} — Water depth at step {t_val}"
+            title = f"{case_label} — {wd_name} at step {t_val}"
             file_tag = str(t_val).replace(":", "-").replace(" ", "_")
 
         fig, ax = plt.subplots(figsize=(base_w, fig_h), dpi=150)
 
         if bg is not None:
-            bg_np = np.array(bg)[::-1, :, :]  # flip vertically to match origin='lower'
-            ax.imshow(bg_np, extent=plot_extent, origin="lower", interpolation="nearest")
+            bg_np = np.array(bg)[::-1, :, :]
+            ax.imshow(bg_np, extent=plot_extent, origin="lower", interpolation="bilinear")
 
         ax.imshow(
             arr,
@@ -2877,23 +3189,23 @@ def plot_water_depths_deterministic_from_netcdfile(
             origin="lower",
             cmap=cmap_disc,
             norm=norm,
-            interpolation="nearest",
+            interpolation="bilinear",
         )
 
         ax.set_title(title, fontsize=20, fontweight="bold")
-        ax.set_xlabel("")
-        ax.set_ylabel("")
         ax.set_aspect("equal")
         ax.grid(False)
         ax.set_xlim(xmin, xmax)
         ax.set_ylim(ymin, ymax)
+        ax.set_xlabel("")
+        ax.set_ylabel("")
         ax.tick_params(
             left=False, right=False, bottom=False, top=False,
             labelleft=False, labelright=False, labelbottom=False, labeltop=False
         )
 
         tag_zoom = "_zoom" if extent is not None else ""
-        out_png = os.path.join(out_dir, f"Combiprecip_{file_tag}{tag_zoom}.png")
+        out_png = os.path.join(out_dir, f"Combiprecip_{wd_name}_{file_tag}{tag_zoom}.png")
         plt.savefig(out_png, bbox_inches="tight")
         plt.close(fig)
         print(f"✅ saved {out_png}")
@@ -2902,3 +3214,220 @@ def plot_water_depths_deterministic_from_netcdfile(
 
     ticks = [t for t in edges if (t >= threshold and t <= vmax)] or [threshold, vmax]
     return cmap_disc, norm, ticks, vmax
+
+
+############################################################################################
+################# Plot Combiprecip from non uniform grid accnugrid #######################
+#########################################################################################
+import os
+import numpy as np
+import xarray as xr
+import matplotlib.pyplot as plt
+from matplotlib.collections import PolyCollection
+from matplotlib.colors import ListedColormap, BoundaryNorm
+from PIL import Image
+
+
+def plot_h_unstructured_colored_edges(
+    nc_path: str,
+    out_dir: str,
+    threshold: float = 0.01,
+    vmax: float = 3.5,
+    layer: str = "ch.swisstopo.swisstlm3d-karte-grau",
+    bg_pixel_size: float = 1.0,
+    bg_max_px: int = 4096,
+    case_label: str = "Zell",
+    init_time_str: str | None = None,
+    extent=None,                 # (xmin, xmax, ymin, ymax) in EPSG:2056
+    extent_units: str = "m",     # "m" or "km"
+    linewidth: float = 0.12,
+    dpi: int = 200,
+    figsize=(10, 8),
+):
+    """
+    Plot unstructured UGRID NetCDF variable h(time, mesh2d_face) as polygons,
+    overlaid on swisstopo WMS background (EPSG:2056), with ParaView-like
+    feature edges where edge color follows the same class color as faces.
+
+    Expected variables/dims:
+      - mesh2d_node_x(mesh2d_node), mesh2d_node_y(mesh2d_node)
+      - mesh2d_face_nodes(mesh2d_face, max_n_face_nodes) padded with -1
+      - h(time, mesh2d_face)
+
+    Saves one PNG per timestep in out_dir.
+    """
+
+    def _extent_to_meters(ext, units):
+        if ext is None:
+            return None
+        xmin, xmax, ymin, ymax = ext
+        if units == "km":
+            return xmin * 1000.0, xmax * 1000.0, ymin * 1000.0, ymax * 1000.0
+        return xmin, xmax, ymin, ymax
+
+    def _fmt_dt(dt64):
+        return np.datetime_as_string(dt64, unit="s")
+
+    def _get_swisstopo_background_image_hq(xmin, xmax, ymin, ymax, pixel_size_m=1.0, max_px=4096):
+        import requests
+        from io import BytesIO
+
+        width = int(max(1, round((xmax - xmin) / float(pixel_size_m))))
+        height = int(max(1, round((ymax - ymin) / float(pixel_size_m))))
+        scale = max(width / max_px, height / max_px, 1.0)
+        width = int(width / scale)
+        height = int(height / scale)
+
+        params = {
+            "SERVICE": "WMS",
+            "REQUEST": "GetMap",
+            "VERSION": "1.3.0",
+            "LAYERS": layer,
+            "BBOX": f"{xmin},{ymin},{xmax},{ymax}",
+            "CRS": "EPSG:2056",
+            "WIDTH": width,
+            "HEIGHT": height,
+            "FORMAT": "image/png",
+            "TRANSPARENT": "TRUE",
+        }
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "image/png,image/*,*/*;q=0.8"}
+        r = requests.get("https://wms.geo.admin.ch/", params=params, headers=headers, timeout=60)
+        r.raise_for_status()
+        return Image.open(BytesIO(r.content))
+
+    # -------------------------
+    # class bins + colors (YOUR SETTINGS)
+    # -------------------------
+    class_edges = [threshold, 0.10, 0.30, 0.50, 1.0, 1.50, 2.0, 2.5, 3.0, vmax]
+    class_colors = [
+        "#f7fcf0",
+        "#ccebc5",
+        "#a8ddb5",
+        "#7bccc4",
+        "#4eb3d3",
+        "#2b8cbe",
+        "#08589e",
+        "#08306b",
+        "#54278f",
+        "#4d004b",
+    ]
+    cmap_disc = ListedColormap(class_colors)
+    norm = BoundaryNorm(class_edges, ncolors=cmap_disc.N, clip=False)
+
+    # -------------------------
+    # load dataset
+    # -------------------------
+    os.makedirs(out_dir, exist_ok=True)
+    ds = xr.open_dataset(nc_path)
+
+    if "h" not in ds:
+        raise ValueError("Dataset has no variable 'h'.")
+
+    if ("time" not in ds["h"].dims) or ("mesh2d_face" not in ds["h"].dims):
+        raise ValueError(f"Expected h(time, mesh2d_face). Found: {ds['h'].dims}")
+
+    x_node = ds["mesh2d_node_x"].values
+    y_node = ds["mesh2d_node_y"].values
+    faces = ds["mesh2d_face_nodes"].values
+    times = ds["time"].values
+
+    # -------------------------
+    # extent (same behavior as your old script)
+    # -------------------------
+    dom_xmin, dom_xmax = float(np.nanmin(x_node)), float(np.nanmax(x_node))
+    dom_ymin, dom_ymax = float(np.nanmin(y_node)), float(np.nanmax(y_node))
+
+    if extent is None:
+        xmin, xmax, ymin, ymax = dom_xmin, dom_xmax, dom_ymin, dom_ymax
+    else:
+        xmin_i, xmax_i, ymin_i, ymax_i = _extent_to_meters(extent, extent_units)
+
+        # allow inverted order (like your example ymin>ymax)
+        xmin_i, xmax_i = sorted([xmin_i, xmax_i])
+        ymin_i, ymax_i = sorted([ymin_i, ymax_i])
+
+        xmin = max(dom_xmin, xmin_i)
+        xmax = min(dom_xmax, xmax_i)
+        ymin = max(dom_ymin, ymin_i)
+        ymax = min(dom_ymax, ymax_i)
+
+    plot_extent = (xmin, xmax, ymin, ymax)
+
+    # build polygons once
+    polygons = []
+    for face in faces:
+        ids = face[face >= 0]
+        polygons.append(np.column_stack([x_node[ids], y_node[ids]]))
+
+    # background once
+    try:
+        bg = _get_swisstopo_background_image_hq(
+            xmin, xmax, ymin, ymax,
+            pixel_size_m=bg_pixel_size,
+            max_px=bg_max_px
+        )
+    except Exception as e:
+        print(f"⚠️ WMS fetch failed ({e}). Plotting without background.")
+        bg = None
+
+    # dummy mappable for colorbar
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap_disc)
+    sm.set_array([])
+
+    init_tag = ""
+    if init_time_str:
+        init_tag = init_time_str.replace(":", "-")
+
+    # -------------------------
+    # plot each timestep
+    # -------------------------
+    for t_idx, t_val in enumerate(times):
+        h = ds["h"].isel(time=t_idx).values.astype(np.float32)
+        h_plot = np.where(h >= threshold, h, np.nan)
+
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+
+        if bg is not None:
+            bg_np = np.array(bg)[::-1, :, :]
+            ax.imshow(bg_np, extent=plot_extent, origin="lower", interpolation="bilinear")
+
+        # one collection per class so edgecolor == facecolor
+        for i in range(len(class_edges) - 1):
+            lo = class_edges[i]
+            hi = class_edges[i + 1]
+            col = class_colors[i]
+
+            mask = np.isfinite(h_plot) & (h_plot >= lo) & (h_plot < hi)
+            if not np.any(mask):
+                continue
+
+            idx = np.where(mask)[0]
+            polys_i = [polygons[j] for j in idx]
+
+            pc = PolyCollection(
+                polys_i,
+                facecolors=col,
+                edgecolors=col,
+                linewidths=linewidth,
+                alpha=1.0,
+            )
+            ax.add_collection(pc)
+
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+        ax.set_aspect("equal")
+        ax.set_axis_off()
+
+        t_txt = _fmt_dt(t_val)
+        ax.set_title(f"{case_label} — h — {t_txt}", fontsize=16, fontweight="bold")
+
+        cb = plt.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
+        cb.set_label("h", fontsize=12)
+
+        tag = t_txt.replace(":", "-")
+        out_png = os.path.join(out_dir, f"{case_label}_h_{init_tag}_{tag}_zoom.png".replace("__", "_"))
+        plt.savefig(out_png, bbox_inches="tight")
+        plt.close(fig)
+        print(f"✅ saved {out_png}")
+
+    ds.close()
