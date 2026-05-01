@@ -1851,7 +1851,8 @@ def plot_deterministic_perhour(
 
 
 ################################################################################################
-######################## ASCII in netcdfile ###############################################
+######################## ASCII in netcdfile ####################################################
+################################################################################################
 import os
 import numpy as np
 import xarray as xr
@@ -3215,6 +3216,514 @@ def plot_water_depths_deterministic_from_netcdfile(
     ticks = [t for t in edges if (t >= threshold and t <= vmax)] or [threshold, vmax]
     return cmap_disc, norm, ticks, vmax
 
+
+###########################################################################################
+####################### Plot hazard but with the 2 layers of Storme #####################
+######################################################################################
+import os
+import numpy as np
+import xarray as xr
+import geopandas as gpd
+import matplotlib.pyplot as plt
+from PIL import Image
+from matplotlib.colors import ListedColormap, BoundaryNorm
+from rasterio.features import rasterize
+from rasterio.transform import Affine
+
+
+def plot_water_depths_deterministic_from_netcdfile_storme(
+    nc_path,
+    out_dir,
+    threshold=0.10,
+    vmax=3.5,
+    bg_pixel_size=1.0,
+    bg_max_px=4096,
+    layer="ch.swisstopo.swisstlm3d-karte-grau",
+    case_label="Zell",
+    init_time_str=None,
+    extent=None,
+    extent_units="auto",
+    min_fig_height=6.0,
+    storm_gpkg=None,
+    layer_surface_runoff="prozessraum_wasser_oberflaechenabfluss_grundwasseraufstoss",
+    layer_flooding="prozessraum_wasser_ueberschwemmung_uebermurung",
+    color_surface_runoff="magenta",
+    color_flooding="orange",
+    alpha_surface_runoff=0.35,
+    alpha_flooding=0.35,
+    mask_gpkg="/storage/homefs/ge24z347/Zell_event/Data_forprocess/SWISSTLM3D_2025.gpkg",
+    mask_layer="tlm_bb_bodenbedeckung",
+    mask_objektart_col="objektart",
+    mask_objektart_value="Stehende Gewaesser",
+):
+    """
+    Plot deterministic water-depth maps from a NetCDF and overlay STORME polygons,
+    excluding standing-water polygons from the raster and from the STORME polygons.
+
+    Supported thresholds:
+        0.01 or 0.10
+
+    Final class is >= 3.00
+    """
+
+    def _get_swisstopo_background_image_hq(
+        xmin, xmax, ymin, ymax,
+        pixel_size_m=1.0,
+        layer="ch.swisstopo.swisstlm3d-karte-grau",
+        max_px=4096,
+    ):
+        import requests
+        from io import BytesIO
+
+        width = int(max(1, round((xmax - xmin) / float(pixel_size_m))))
+        height = int(max(1, round((ymax - ymin) / float(pixel_size_m))))
+        scale = max(width / max_px, height / max_px, 1.0)
+        width = int(width / scale)
+        height = int(height / scale)
+
+        params = {
+            "SERVICE": "WMS",
+            "REQUEST": "GetMap",
+            "VERSION": "1.3.0",
+            "LAYERS": layer,
+            "BBOX": f"{xmin},{ymin},{xmax},{ymax}",
+            "CRS": "EPSG:2056",
+            "WIDTH": width,
+            "HEIGHT": height,
+            "FORMAT": "image/png",
+            "TRANSPARENT": "TRUE",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "image/png,image/*,*/*;q=0.8",
+        }
+
+        r = requests.get(
+            "https://wms.geo.admin.ch/",
+            params=params,
+            headers=headers,
+            timeout=60,
+        )
+        r.raise_for_status()
+        return Image.open(BytesIO(r.content))
+
+    def _extent_to_meters(ext, units):
+        if ext is None:
+            return None
+        xmin, xmax, ymin, ymax = ext
+        if units == "m":
+            return (xmin, xmax, ymin, ymax)
+        if units == "km":
+            return (xmin * 1000.0, xmax * 1000.0, ymin * 1000.0, ymax * 1000.0)
+        return (
+            (xmin * 1000.0, xmax * 1000.0, ymin * 1000.0, ymax * 1000.0)
+            if max(abs(v) for v in ext) < 10000
+            else (xmin, xmax, ymin, ymax)
+        )
+
+    def _fmt_dt(dt64):
+        return np.datetime_as_string(dt64, unit="s")
+
+    def _load_and_clip_layer(gpkg_path, layer_name, xmin, xmax, ymin, ymax):
+        if gpkg_path is None:
+            return None
+        try:
+            gdf = gpd.read_file(gpkg_path, layer=layer_name)
+
+            if gdf.empty:
+                print(f"⚠️ Layer '{layer_name}' is empty in {gpkg_path}.")
+                return None
+
+            if gdf.crs is None:
+                print(f"⚠️ Layer '{layer_name}' has no CRS. Assuming EPSG:2056.")
+                gdf = gdf.set_crs(epsg=2056, allow_override=True)
+            else:
+                gdf = gdf.to_crs(epsg=2056)
+
+            gdf = gdf[gdf.geometry.notnull()].copy()
+            gdf = gdf[~gdf.geometry.is_empty].copy()
+
+            try:
+                gdf.geometry = gdf.geometry.make_valid()
+            except Exception:
+                pass
+
+            gdf = gdf.cx[xmin:xmax, ymin:ymax].copy()
+
+            if gdf.empty:
+                print(f"ℹ️ No features from '{layer_name}' inside plot extent.")
+                return None
+
+            return gdf
+
+        except Exception as e:
+            print(f"⚠️ Could not load layer '{layer_name}' from '{gpkg_path}': {e}")
+            return None
+
+    def _subtract_mask(source_gdf, mask_gdf, name="layer"):
+        if source_gdf is None or source_gdf.empty:
+            return source_gdf
+        if mask_gdf is None or mask_gdf.empty:
+            return source_gdf
+
+        try:
+            source_gdf = source_gdf.copy()
+            mask_gdf = mask_gdf.copy()
+
+            try:
+                source_gdf.geometry = source_gdf.geometry.make_valid()
+                mask_gdf.geometry = mask_gdf.geometry.make_valid()
+            except Exception:
+                pass
+
+            source_gdf = source_gdf[source_gdf.geometry.notnull()].copy()
+            source_gdf = source_gdf[~source_gdf.geometry.is_empty].copy()
+            mask_gdf = mask_gdf[mask_gdf.geometry.notnull()].copy()
+            mask_gdf = mask_gdf[~mask_gdf.geometry.is_empty].copy()
+
+            result = gpd.overlay(source_gdf, mask_gdf[["geometry"]], how="difference")
+
+            if result.empty:
+                print(f"ℹ️ After masking, '{name}' became empty.")
+                return None
+
+            result = result[result.geometry.notnull()].copy()
+            result = result[~result.geometry.is_empty].copy()
+            result = result.explode(index_parts=False).reset_index(drop=True)
+
+            print(f"ℹ️ Applied standing-water mask to '{name}'.")
+            return result
+
+        except Exception as e:
+            print(f"⚠️ Could not apply mask to '{name}': {e}")
+            return source_gdf
+
+    def _mask_raster_with_polygons(arr, x_coords, y_coords, mask_gdf):
+        if mask_gdf is None or mask_gdf.empty:
+            return arr
+
+        try:
+            geoms = [geom for geom in mask_gdf.geometry if geom is not None and not geom.is_empty]
+            if not geoms:
+                return arr
+
+            x_coords = np.asarray(x_coords)
+            y_coords = np.asarray(y_coords)
+
+            nrows, ncols = arr.shape
+
+            if len(x_coords) > 1:
+                dx = abs(float(x_coords[1] - x_coords[0]))
+            else:
+                dx = 1.0
+
+            if len(y_coords) > 1:
+                dy = abs(float(y_coords[1] - y_coords[0]))
+            else:
+                dy = 1.0
+
+            xmin_pix = float(np.min(x_coords)) - dx / 2.0
+            ymax_pix = float(np.max(y_coords)) + dy / 2.0
+
+            transform = Affine(dx, 0.0, xmin_pix, 0.0, -dy, ymax_pix)
+
+            mask_int = rasterize(
+                [(geom, 1) for geom in geoms],
+                out_shape=(nrows, ncols),
+                transform=transform,
+                fill=0,
+                all_touched=True,
+                dtype="uint8",
+            )
+
+            # Important: match origin="lower" used in imshow
+            mask_int = np.flipud(mask_int)
+
+            masked_pixels = int(mask_int.sum())
+            print(f"ℹ️ Standing-water masked pixels: {masked_pixels}")
+
+            arr_masked = arr.copy()
+            arr_masked[mask_int == 1] = np.nan
+            print("ℹ️ Applied standing-water mask to raster.")
+            return arr_masked
+
+        except Exception as e:
+            print(f"⚠️ Could not apply standing-water mask to raster: {e}")
+            return arr
+
+    def _raster_extent_from_coords(x_coords, y_coords):
+        x_coords = np.asarray(x_coords)
+        y_coords = np.asarray(y_coords)
+
+        if len(x_coords) > 1:
+            dx = abs(float(x_coords[1] - x_coords[0]))
+        else:
+            dx = 1.0
+
+        if len(y_coords) > 1:
+            dy = abs(float(y_coords[1] - y_coords[0]))
+        else:
+            dy = 1.0
+
+        xmin = float(np.min(x_coords)) - dx / 2.0
+        xmax = float(np.max(x_coords)) + dx / 2.0
+        ymin = float(np.min(y_coords)) - dy / 2.0
+        ymax = float(np.max(y_coords)) + dy / 2.0
+        return (xmin, xmax, ymin, ymax)
+
+    os.makedirs(out_dir, exist_ok=True)
+    ds = xr.open_dataset(nc_path)
+
+    if "time" in ds.dims:
+        time_dim = "time"
+    elif "REFERENCE_TS" in ds.dims:
+        time_dim = "REFERENCE_TS"
+    elif "lead_time" in ds.dims:
+        time_dim = "lead_time"
+    elif "step" in ds.dims:
+        time_dim = "step"
+    else:
+        raise ValueError(
+            "Couldn't find a time dimension named 'time', 'REFERENCE_TS', 'lead_time', or 'step'."
+        )
+
+    if "h_smooth" in ds.data_vars:
+        wd_name = "h_smooth"
+    elif "h" in ds.data_vars:
+        wd_name = "h"
+    elif "water_depth" in ds.data_vars:
+        wd_name = "water_depth"
+    elif "wd" in ds.data_vars:
+        wd_name = "wd"
+    else:
+        raise ValueError(
+            "No variable found: expected one of ['h_smooth', 'h', 'water_depth', 'wd']."
+        )
+
+    x_all = ds["x"].values
+    y_all = ds["y"].values
+    dom_xmin, dom_xmax = float(np.min(x_all)), float(np.max(x_all))
+    dom_ymin, dom_ymax = float(np.min(y_all)), float(np.max(y_all))
+
+    if extent is None:
+        xmin, xmax, ymin, ymax = dom_xmin, dom_xmax, dom_ymin, dom_ymax
+    else:
+        xmin_i, xmax_i, ymin_i, ymax_i = _extent_to_meters(extent, extent_units)
+        xmin = max(dom_xmin, min(xmin_i, xmax_i))
+        xmax = min(dom_xmax, max(xmin_i, xmax_i))
+        ymin = max(dom_ymin, min(ymin_i, ymax_i))
+        ymax = min(dom_ymax, max(ymin_i, ymax_i))
+
+    plot_extent = (xmin, xmax, ymin, ymax)
+
+    x_asc = x_all[0] < x_all[-1]
+    y_asc = y_all[0] < y_all[-1]
+    xsel = slice(xmin, xmax) if x_asc else slice(xmax, xmin)
+    ysel = slice(ymin, ymax) if y_asc else slice(ymax, ymin)
+
+    try:
+        bg = _get_swisstopo_background_image_hq(
+            xmin, xmax, ymin, ymax,
+            pixel_size_m=bg_pixel_size,
+            layer=layer,
+            max_px=bg_max_px,
+        )
+    except Exception as e:
+        print(f"⚠️ WMS fetch failed ({e}). Proceeding without background.")
+        bg = None
+
+    full_edges = [0.01, 0.10, 0.30, 0.50, 1.00, 1.50, 2.00, 2.50, 3.00, 100.0]
+    full_colors = [
+        "#f7fcf0",
+        "#ccebc5",
+        "#a8ddb5",
+        "#7bccc4",
+        "#4eb3d3",
+        "#2b8cbe",
+        "#08589e",
+        "#08306b",
+        "#54278f",
+    ]
+
+    valid_thresholds = [0.01, 0.10]
+    if threshold not in valid_thresholds:
+        raise ValueError(f"threshold must be one of {valid_thresholds}, got {threshold}")
+
+    start_idx = full_edges.index(threshold)
+    edges = full_edges[start_idx:]
+    colors = full_colors[start_idx:]
+
+    cmap_disc = ListedColormap(colors)
+    cmap_disc.set_under((0, 0, 0, 0))
+    cmap_disc.set_bad((0, 0, 0, 0))
+    norm = BoundaryNorm(edges, cmap_disc.N, clip=False)
+
+    xspan = xmax - xmin
+    yspan = ymax - ymin
+    base_w = 8.0
+    fig_h = max(min_fig_height, base_w * (yspan / xspan))
+
+    da_wd = ds[wd_name].sel(x=xsel, y=ysel)
+    x_sel = da_wd["x"].values
+    y_sel = da_wd["y"].values
+    x_desc = x_sel[0] > x_sel[-1]
+    y_desc = y_sel[0] > y_sel[-1]
+
+    raster_extent = _raster_extent_from_coords(x_sel, y_sel)
+
+    print(
+        "Raster subset bounds:",
+        float(np.min(x_sel)), float(np.max(x_sel)),
+        float(np.min(y_sel)), float(np.max(y_sel))
+    )
+    print("Raster image extent:", raster_extent)
+
+    gdf_surface_runoff = _load_and_clip_layer(
+        storm_gpkg, layer_surface_runoff, xmin, xmax, ymin, ymax
+    )
+    gdf_flooding = _load_and_clip_layer(
+        storm_gpkg, layer_flooding, xmin, xmax, ymin, ymax
+    )
+
+    mask_gdf = _load_and_clip_layer(
+        mask_gpkg, mask_layer, xmin, xmax, ymin, ymax
+    )
+
+    if mask_gdf is not None:
+        if mask_objektart_col in mask_gdf.columns:
+            print(
+                "Mask unique objektart before filter:",
+                mask_gdf[mask_objektart_col].astype(str).str.strip().unique()[:20]
+            )
+
+            mask_gdf = mask_gdf[
+                mask_gdf[mask_objektart_col].astype(str).str.strip().str.lower()
+                == mask_objektart_value.strip().lower()
+            ].copy()
+
+            if mask_gdf.empty:
+                print(
+                    f"ℹ️ No polygons found in '{mask_layer}' with "
+                    f"{mask_objektart_col} = '{mask_objektart_value}'."
+                )
+                mask_gdf = None
+            else:
+                mask_gdf = mask_gdf[mask_gdf.geometry.notnull()].copy()
+                mask_gdf = mask_gdf[~mask_gdf.geometry.is_empty].copy()
+                mask_gdf = mask_gdf.explode(index_parts=False).reset_index(drop=True)
+
+                try:
+                    mask_gdf.geometry = mask_gdf.geometry.make_valid()
+                except Exception:
+                    pass
+
+                print(
+                    f"ℹ️ Loaded {len(mask_gdf)} standing-water polygon(s) "
+                    f"from '{mask_gpkg}'."
+                )
+                print("Mask bounds:", mask_gdf.total_bounds)
+        else:
+            print(f"⚠️ Column '{mask_objektart_col}' not found in mask layer '{mask_layer}'.")
+            mask_gdf = None
+
+    gdf_surface_runoff = _subtract_mask(gdf_surface_runoff, mask_gdf, name="surface runoff")
+    gdf_flooding = _subtract_mask(gdf_flooding, mask_gdf, name="flooding")
+
+    times = ds[time_dim].values
+
+    for t_idx, t_val in enumerate(times):
+        da_t = da_wd.isel({time_dim: t_idx}).transpose("y", "x")
+        arr = da_t.values.astype(np.float32)
+
+        if y_desc:
+            arr = arr[::-1, :]
+        if x_desc:
+            arr = arr[:, ::-1]
+
+        arr = np.where(arr >= threshold, arr, np.nan)
+        arr = _mask_raster_with_polygons(arr, x_sel, y_sel, mask_gdf)
+        arr = np.ma.masked_invalid(arr)
+
+        if np.issubdtype(np.asarray(times).dtype, np.datetime64):
+            t_txt = _fmt_dt(t_val)
+            title = f"{case_label} — {wd_name} at {t_txt}"
+            file_tag = t_txt.replace(":", "-")
+        else:
+            title = f"{case_label} — {wd_name} at step {t_val}"
+            file_tag = str(t_val).replace(":", "-").replace(" ", "_")
+
+        fig, ax = plt.subplots(figsize=(base_w, fig_h), dpi=150)
+
+        if bg is not None:
+            bg_np = np.array(bg)[::-1, :, :]
+            ax.imshow(
+                bg_np,
+                extent=plot_extent,
+                origin="lower",
+                interpolation="nearest",
+            )
+
+        ax.imshow(
+            arr,
+            extent=raster_extent,
+            origin="lower",
+            cmap=cmap_disc,
+            norm=norm,
+            interpolation="nearest",
+        )
+
+        if gdf_surface_runoff is not None and not gdf_surface_runoff.empty:
+            gdf_surface_runoff.plot(
+                ax=ax,
+                facecolor=color_surface_runoff,
+                edgecolor=color_surface_runoff,
+                alpha=alpha_surface_runoff,
+                zorder=20,
+            )
+
+        if gdf_flooding is not None and not gdf_flooding.empty:
+            gdf_flooding.plot(
+                ax=ax,
+                facecolor=color_flooding,
+                edgecolor=color_flooding,
+                alpha=alpha_flooding,
+                zorder=21,
+            )
+
+        ax.set_title(title, fontsize=20, fontweight="bold")
+        ax.set_aspect("equal")
+        ax.grid(False)
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.tick_params(
+            left=False, right=False, bottom=False, top=False,
+            labelleft=False, labelright=False, labelbottom=False, labeltop=False
+        )
+
+        tag_zoom = "_zoom" if extent is not None else ""
+        out_png = os.path.join(
+            out_dir,
+            f"Combiprecip_{wd_name}_{file_tag}{tag_zoom}.png",
+        )
+
+        fig.patch.set_alpha(0)
+        ax.patch.set_alpha(0)
+
+        plt.savefig(
+            out_png,
+            bbox_inches="tight",
+            transparent=True,
+            pad_inches=0
+        )
+        plt.close(fig)
+        print(f"✅ saved {out_png}")
+
+    ds.close()
+
+    ticks = edges[:-1]
+    return cmap_disc, norm, ticks, vmax
 
 ############################################################################################
 ################# Plot Combiprecip from non uniform grid accnugrid #######################

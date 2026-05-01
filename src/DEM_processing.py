@@ -746,7 +746,7 @@ from osgeo import gdal
 def merge_dem_rasters(
     input_folder,
     output_file,
-    bounds,
+    bounds=None,
     output_format="GTiff",
     data_type=gdal.GDT_Float32,
     xRes=2.0,
@@ -769,17 +769,16 @@ def merge_dem_rasters(
     print(f"  {bounds}")
     print(f"Pixel size: {xRes} x {yRes}")
 
-    gdal.Warp(
-        destNameOrDestDS=output_file,
-        srcDSOrSrcDSTab=relevant_rasters,
-        format=output_format,
-        outputType=data_type,
-        multithread=True,
-        outputBounds=bounds,          # enforce extent
-        xRes=xRes,                    # <-- now configurable
-        yRes=yRes,                    # <-- now configurable
-        targetAlignedPixels=True      # align grid to bounds
-    )
+    gdal.Warp(destNameOrDestDS=output_file,
+            srcDSOrSrcDSTab=relevant_rasters,
+            format=output_format,
+            outputType=data_type,
+            multithread=True,
+            outputBounds=bounds if bounds else None,
+            xRes=xRes,
+            yRes=yRes,
+            targetAlignedPixels=True
+            )
 
     if os.path.exists(output_file):
         print(f" Merged DEM saved: {output_file}")
@@ -827,6 +826,48 @@ def merge_dem_rasters_binput(input_folder, output_file, bbox, output_format="GTi
         print(f" Merged and cropped DEM saved to: {output_file}")
     else:
         print(" Merge failed.")
+
+######################## resample DEM OR TIF FILE ###############################################
+
+import os
+from osgeo import gdal
+
+def resample_raster_swisssurface3d(
+    input_raster,
+    output_raster,
+    xRes=2.0,
+    yRes=2.0,
+    resampleAlg="max"
+):
+    """
+    Resample raster to new resolution.
+
+    Parameters
+    ----------
+    input_raster : path to input raster
+    output_raster : path to output raster
+    xRes, yRes : target resolution (e.g. 2.0 for 2 m)
+    resampleAlg : resampling method ("max" recommended for DSM)
+    """
+
+    os.makedirs(os.path.dirname(output_raster), exist_ok=True)
+
+    print(f"Resampling {input_raster}")
+    print(f"Target resolution: {xRes} x {yRes}")
+    print(f"Resampling method: {resampleAlg}")
+
+    gdal.Warp(
+        destNameOrDestDS=output_raster,
+        srcDSOrSrcDSTab=input_raster,
+        xRes=xRes,
+        yRes=yRes,
+        resampleAlg=resampleAlg,
+        targetAlignedPixels=True,
+        multithread=True
+    )
+
+    print(f"Done: {output_raster}")
+
 
 ##################################################################################################
 ###################### clip to Manning values bbox ##############################################

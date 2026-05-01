@@ -452,56 +452,32 @@ def crop_deterministic_Combiprecip(
     x_vals = ds[x_name].values.astype(float)
     y_vals = ds[y_name].values.astype(float)
 
-    if len(x_vals) < 2 or len(y_vals) < 2:
-        raise ValueError("x/y coordinates too short to infer dx/dy")
-
     dx = float(np.median(np.diff(np.sort(x_vals))))
     dy = float(np.median(np.diff(np.sort(y_vals))))
     dy_abs = abs(dy)
 
     print(f"CPC spacing ▶ dx={dx:.1f}  dy={dy:.1f}")
 
-    # Expand DEM bbox by half a CPC cell so outer CPC cells are included
     x_min = left  - dx/2
     x_max = right + dx/2
     y_min = bottom - dy_abs/2
     y_max = top    + dy_abs/2
 
-    # Respect axis direction for slice
     x_slice = slice(x_min, x_max) if x_vals[0] < x_vals[-1] else slice(x_max, x_min)
     y_slice = slice(y_max, y_min) if y_vals[0] > y_vals[-1] else slice(y_min, y_max)
 
     # --------------------------------------------------
-    # 4) Subset time + expanded space
+    # 4) Subset
     # --------------------------------------------------
     ds_sel = ds.sel({time_name: selected_times}).sel({x_name: x_slice, y_name: y_slice})
-
-    if ds_sel.sizes.get(time_name, 0) == 0:
-        raise ValueError("No matching time steps after selection.")
-    if ds_sel.sizes.get(x_name, 0) == 0 or ds_sel.sizes.get(y_name, 0) == 0:
-        raise ValueError("Spatial crop returned empty x or y dimension.")
 
     print(
         f"Selected steps: {ds_sel.sizes[time_name]} | "
         f"Crop size: x={ds_sel.sizes[x_name]}, y={ds_sel.sizes[y_name]}"
     )
 
-    # --- Print resulting bounds (center coords)
-    x_out = ds_sel[x_name].values.astype(float)
-    y_out = ds_sel[y_name].values.astype(float)
-
-    print("NC bounds (centers):",
-          (float(x_out.min()), float(y_out.min()), float(x_out.max()), float(y_out.max())))
-
-    # If you want “cell-edge bbox” (more meaningful for raster extents)
-    out_left   = float(x_out.min() - dx/2)
-    out_right  = float(x_out.max() + dx/2)
-    out_bottom = float(y_out.min() - dy_abs/2)
-    out_top    = float(y_out.max() + dy_abs/2)
-    print("NC bbox (edges)  ≈", (out_left, out_bottom, out_right, out_top))
-
     # --------------------------------------------------
-    # 5) Extract variable and reorder dims → (time, y, x)
+    # 5) Extract variable
     # --------------------------------------------------
     da = ds_sel[var_name].transpose(time_name, y_name, x_name)
 
@@ -520,13 +496,14 @@ def crop_deterministic_Combiprecip(
     nc.createDimension("x", nx)
     nc.createDimension("y", ny)
 
-    # time float64: 0.0..N-1
+    # ✅ TIME (FIXED)
     tv = nc.createVariable("time", "f8", ("time",))
-    tv.long_name = "time_step"
-    tv.units = "1"
+    #tv.long_name = "time"
+    tv.units = "hour"
     tv.axis = "T"
     tv[:] = np.arange(nt, dtype=np.float64)
 
+    # SPACE
     xv = nc.createVariable("x", "f4", ("x",))
     yv = nc.createVariable("y", "f4", ("y",))
     xv.units = "m"; xv.axis = "X"
@@ -534,23 +511,22 @@ def crop_deterministic_Combiprecip(
     xv[:] = x
     yv[:] = y
 
+    # ✅ RAINFALL (clean, only units)
     rv = nc.createVariable(
         "rainfall_depth", "f4", ("time", "y", "x"),
         zlib=True, complevel=4, shuffle=True
     )
     rv.units = "mm"
-    rv.standard_name = "precipitation_amount"
     rv[:] = data
 
-    nc.description = "Cropped deterministic CPC rainfall (half-cell expanded bbox)"
+    nc.description = "Cropped deterministic CPC rainfall"
     nc.history = f"Created on {date.today().isoformat()}"
-    nc.source = "CPC deterministic forecast cropped to DEM footprint"
+    nc.source = "CPC deterministic forecast cropped to DEM"
 
     nc.close()
     ds.close()
 
     print(f"✔ Saved: {output_nc}")
-    print("✔ time written as float64: 0.0..N-1")
 
 
 #######################################################################################
@@ -1510,3 +1486,68 @@ def write_bdy_qvar(output_path, inflows, times):
 
     Path(output_path).write_text("\n".join(lines))
     print(f"✔ .bdy written → {output_path}")
+    
+    
+    
+################################################################################################
+############################## create netcdfiles over the dem 60 min and 75 min ###############
+################################ uniform ######################################################
+
+import os
+from DEM_processing import precipitation_netcdf
+
+def create_precip_automatic_camp(base_name, dem_file_path, buffer_start, buffer_end, buffer_step):
+    """
+    Generate NetCDF files for different precipitation intensities based on a single DEM file.
+
+    Parameters:
+    - base_name (str): Base name for output files (e.g., 'Morges_2m_v1')
+    - dem_file_path (str): Path to the DEM file
+    - buffer_start (int): Minimum precipitation (e.g., 5)
+    - buffer_end (int): Maximum precipitation (e.g., 75)
+    - buffer_step (int): Step size (e.g., 10 → 10, 20, 30, ...)
+    """
+    output_dir = os.path.dirname(dem_file_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    frequency_per_hour = [0, 9.30, 17.81, 18.70, 14.37, 11.13, 7.43, 5.28, 4.47, 3.41, 3.01, 2.68, 2.41]
+
+    for total_precipitation in range(buffer_start, buffer_end + 1, buffer_step):
+        print(f" Creating NetCDF for {base_name} with total precipitation = {total_precipitation} mm")
+
+        nc_path = os.path.join(output_dir, f"{base_name}_{total_precipitation}.nc")
+
+        precipitation_netcdf(dem_file_path, total_precipitation, nc_path, frequency_per_hour)
+
+        print(f" Created NetCDF: {nc_path}")
+
+#######################################################################################################
+
+import os
+from DEM_processing import precipitation_netcdf
+
+def create_precip_automatic_camp_v2(base_name, dem_file_path, buffer_start, buffer_end, buffer_step, output_dir):
+    """
+    Generate NetCDF files for different precipitation intensities based on a single DEM file.
+    Adds 15 minutes dry tail to the rainfall distribution at the end.
+    Saves output to the given directory.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Frequency in mm/h per 5-minute step:
+    frequency_core = [0.0, 9.30, 17.81, 18.70, 14.37, 11.13, 7.43, 5.28, 4.47, 3.41, 3.01, 2.68, 2.41]
+
+    # Build full frequency distribution (18 steps = 90 minutes at 5-minute steps)
+    frequency_per_hour = (
+        frequency_core +      # 60 min rainfall (13 values)
+        [0.0, 0.0, 0.0]  # 15 min dry tail
+    )
+
+    for total_precipitation in range(buffer_start, buffer_end + 1, buffer_step):
+        print(f"Creating NetCDF for {base_name} with total precipitation = {total_precipitation} mm")
+
+        nc_path = os.path.join(output_dir, f"{base_name}_{total_precipitation}.nc")
+
+        precipitation_netcdf(dem_file_path, total_precipitation, nc_path, frequency_per_hour)
+
+        print(f"Created NetCDF: {nc_path}")

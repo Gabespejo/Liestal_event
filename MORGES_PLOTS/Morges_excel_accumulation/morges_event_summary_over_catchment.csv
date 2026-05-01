@@ -1,0 +1,2 @@
+event_start,event_end,event_duration_hours_above_threshold,event_threshold_mm_h,peak_hour_start,peak_hour_end,peak_1h_mean_mm_h,rain_at_17_00_mm_h,rain_17_00_to_19_00_mm,rain_16_00_to_19_00_mm,rain_2h_before_impact_peak_mm,rain_3h_before_impact_peak_mm,total_event_mean_mm,impact_peak_time
+2024-06-25 16:00:00,2024-06-25 19:00:00,3,2,2024-06-25 17:00:00,2024-06-25 18:00:00,48.535606,48.535606,66.35416,68.91589,66.35416,68.91589,71.27185,2024-06-25 19:00:00

@@ -7,96 +7,67 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.abspath(os.path.join(HERE, "..", "src"))
 sys.path.insert(0, SRC)
 
-from files_preparing_to_lisflood import (
-    crop_dem_to_Combiprecip_1km,
-    convert_tif_to_asc,
-    rename_file_extension
-)
+from DEM_processing import resnap_dem_to_combiprecip, convert_tif_to_asc, rename_file_extension
+
+import DTM_and_DSM
+print("DTM_and_DSM loaded from:", DTM_and_DSM.__file__)
+
+from DTM_and_DSM import rasterize_buildings, DTM_DSM_both
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "1) crop full DEM to a square domain based on a catchment polygon "
-            "(snapped to 1 km grid), "
-            "2) convert to ASCII, "
-            "3) rename to .dem, "
-            "4) save bounds"
-        )
-    )
+    parser = argparse.ArgumentParser(description="Prepare DEM pipeline (snap + buildings + DSM/DTM mix + .dem + bounds)")
+    parser.add_argument("--input-dtm-tif", required=True)
+    parser.add_argument("--full-dem", required=True)
+    parser.add_argument("--dsm-tif", required=True)
+    parser.add_argument("--buildings", required=True)
 
-    parser.add_argument("--full-dem", required=True,
-                        help="Full domain DEM GeoTIFF (base DEM)")
-    parser.add_argument("--catchment-shp", required=True,
-                        help="Catchment polygon shapefile / gpkg")
-    parser.add_argument("--id-field", required=True,
-                        help="Column name identifying catchment (e.g. ID)")
-    parser.add_argument("--id-value", required=True,
-                        help="Value in id-field identifying catchment")
-    parser.add_argument("--output-dem", required=True,
-                        help="Path to final .dem file")
-    parser.add_argument("--snap-res", type=int, default=1000,
-                        help="Snap bounds to this grid (default: 1000 m)")
-    parser.add_argument("--pad-m", type=float, default=1000.0,
-                        help="Padding (meters) added around catchment (default: 1000)")
-    parser.add_argument("--mode", choices=["out", "in"], default="out",
-                        help="Snap mode (default: out)")
-    parser.add_argument("--no-square", action="store_true",
-                        help="Disable square domain (not recommended)")
-    parser.add_argument("--enforce-epsg2056", action="store_true",
-                        help="Require DEM CRS to be EPSG:2056")
+    parser.add_argument("--out-folder", required=True)
+    parser.add_argument("--out-name", default="Zell_2m")
+    parser.add_argument("--snap-res", type=int, default=1000)
 
     args = parser.parse_args()
+    os.makedirs(args.out_folder, exist_ok=True)
 
-    # Convert id_value to int/float if possible
-    id_value = args.id_value
-    try:
-        id_value = int(id_value)
-    except ValueError:
-        try:
-            id_value = float(id_value)
-        except ValueError:
-            pass
-
-    # --- Step 1: Crop DEM ---
-    cropped_tif = args.output_dem.replace(".dem", "_crop_1km.tif")
-
-    snapped_bounds = crop_dem_to_Combiprecip_1km(
-        full_dem=args.full_dem,
-        catchment_shp=args.catchment_shp,
-        id_field=args.id_field,
-        id_value=id_value,
-        output_dem=cropped_tif,
+    # 1) Snap DTM
+    snapped_dtm_tif = os.path.join(args.out_folder, f"{args.out_name}_snapped.tif")
+    snapped_bounds = resnap_dem_to_combiprecip(
+        input_dem=args.input_dtm_tif,
+        output_dem=snapped_dtm_tif,
         snap_res=args.snap_res,
-        mode=args.mode,
-        make_square=not args.no_square,
-        pad_m=args.pad_m,
-        enforce_epsg2056=args.enforce_epsg2056
+        mode="out",
+        full_dem=args.full_dem
+    )
+    print(f"✔ Snapped DTM saved: {snapped_dtm_tif}")
+
+    # 2) Buildings mask name = same as geojson but .tif (saved next to the geojson)
+    buildings_mask_tif = os.path.join(args.out_folder, os.path.splitext(os.path.basename(args.buildings))[0] + ".tif")
+    print("Buildings mask will be:", buildings_mask_tif)
+
+    if not os.path.exists(args.buildings):
+        raise FileNotFoundError(f"Buildings vector not found: {args.buildings}")
+
+    rasterize_buildings(
+        buildings_vector=args.buildings,
+        dtm_tif=snapped_dtm_tif,
+        out_buildings_mask_tif=buildings_mask_tif
     )
 
-    # --- Step 2: Convert to ASCII ---
-    asc_file = args.output_dem.replace(".dem", ".asc")
-    convert_tif_to_asc(
-        dem_tif=cropped_tif,
-        output_asc=asc_file,
-        desired_nodata_value=-9999
-    )
+    # 3) Mixed DEM
+    dem_mix_tif = os.path.join(args.out_folder, f"{args.out_name}.tif")
+    DTM_DSM_both(snapped_dtm_tif, args.dsm_tif, buildings_mask_tif, dem_mix_tif)
+    print(f"✔ Mixed DEM saved: {dem_mix_tif}")
 
-    # --- Step 3: Rename .asc → .dem ---
-    rename_file_extension(
-        input_file_path=asc_file,
-        new_extension=".dem"
-    )
+    # 4) Convert to .dem
+    asc_file = os.path.join(args.out_folder, f"{args.out_name}.asc")
+    convert_tif_to_asc(dem_tif=dem_mix_tif, output_asc=asc_file, desired_nodata_value=-9999)
+    rename_file_extension(input_file_path=asc_file, new_extension=".dem")
 
-    # --- Step 4: Save bounds ---
-    bounds_path = args.output_dem.replace(".dem", "_bounds.txt")
+    # 5) Bounds
+    bounds_path = os.path.join(args.out_folder, f"{args.out_name}_bounds.txt")
     with open(bounds_path, "w") as f:
         f.write(",".join(str(b) for b in snapped_bounds))
-
-    print("✔ DEM prepared for LISFLOOD")
-    print(f"✔ Final DEM:     {args.output_dem}")
-    print(f"✔ Bounds file:   {bounds_path}")
-    print(f"✔ Padding used:  {args.pad_m} m")
+    print(f"✔ Saved bounds to: {bounds_path}")
 
 
 if __name__ == "__main__":
